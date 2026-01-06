@@ -1,9 +1,9 @@
 import os
-import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 # Налаштування логування
+import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -35,21 +35,19 @@ async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     """Основна функція для запуску бота"""
-    # Перевірка на наявність токена
     if not BOT_TOKEN:
         logger.error("BOT_TOKEN не знайдено! Бот не може працювати без токена.")
         return
     
     try:
-        # Створення додатку бота
         app = Application.builder().token(BOT_TOKEN).build()
-        
-        # Додавання обробників команд
+
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("test", test))
 
         logger.info("Бот успішно запущено.")
-        app.run_polling()
+        # Запускаємо бота через webhook (треба мати сервер або змінити налаштування на Heroku)
+        app.run_webhook(listen="0.0.0.0", port=int(os.environ.get("PORT", 5000)), url_path=BOT_TOKEN)
     except Exception as e:
         logger.error(f"Помилка при запуску бота: {e}")
 
