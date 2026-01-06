@@ -34,7 +34,7 @@ def check_real_light_status():
             return None, "Не налаштовано IP або ключ розетки"
         
         # === ПІДКЛЮЧЕННЯ ДО РОЗЕТКИ ===
-        import tinytuya
+        import tinytuya # type: ignore
         
         # Створюємо об'єкт пристрою
         device = tinytuya.OutletDevice(DEVICE_ID, DEVICE_IP, LOCAL_KEY)
@@ -89,52 +89,58 @@ async def check_light_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     user = query.from_user
     
-    # Показуємо "завантаження"
+    # Відразу відправляємо підтвердження користувачу, що запит отримано
     await query.answer("🔍 Перевіряю наявність світла...")
-    
-    # РЕАЛЬНА перевірка світла
-    light_status, error = check_real_light_status()
-    current_time = datetime.now().strftime("%H:%M:%S")
-    
-    # Формуємо відповідь
-    if error:
-        response = (
-            f"⚠️ **Не вдалося перевірити світло**\n\n"
-            f"Час: {current_time}\n"
-            f"Помилка: {error}\n\n"
-            f"Переконайтесь, що розетка налаштована."
-        )
-    else:
-        if light_status:
+
+    try:
+        # РЕАЛЬНА перевірка світла
+        light_status, error = check_real_light_status()
+        current_time = datetime.now().strftime("%H:%M:%S")
+        
+        # Формуємо відповідь
+        if error:
             response = (
-                f"✅ **СВІТЛО Є!**\n\n"
-                f"Час перевірки: {current_time}\n"
-                f"Статус: Розетка увімкнена\n"
-                f"Користувач: {user.first_name}\n\n"
-                f"⚡ Електропостачання в нормі."
+                f"⚠️ **Не вдалося перевірити світло**\n\n"
+                f"Час: {current_time}\n"
+                f"Помилка: {error}\n\n"
+                f"Переконайтесь, що розетка налаштована."
             )
         else:
-            response = (
-                f"❌ **СВІТЛА НЕМА!**\n\n"
-                f"Час перевірки: {current_time}\n"
-                f"Статус: Розетка вимкнена\n"
-                f"Користувач: {user.first_name}\n\n"
-                f"💡 Перевірте автоматичні вимикачі."
-            )
+            if light_status:
+                response = (
+                    f"✅ **СВІТЛО Є!**\n\n"
+                    f"Час перевірки: {current_time}\n"
+                    f"Статус: Розетка увімкнена\n"
+                    f"Користувач: {user.first_name}\n\n"
+                    f"⚡ Електропостачання в нормі."
+                )
+            else:
+                response = (
+                    f"❌ **СВІТЛА НЕМА!**\n\n"
+                    f"Час перевірки: {current_time}\n"
+                    f"Статус: Розетка вимкнена\n"
+                    f"Користувач: {user.first_name}\n\n"
+                    f"💡 Перевірте автоматичні вимикачі."
+                )
+
+        # Залишаємо ту саму кнопку для повторної перевірки
+        keyboard = [
+            [InlineKeyboardButton("🔄 Перевірити знову", callback_data='check_light')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Відправляємо результат
+        await query.edit_message_text(
+            response,
+            reply_markup=reply_markup
+        )
+        
+        logger.info(f"Користувач {user.id} перевірив світло. Статус: {light_status}, Помилка: {error}")
     
-    # Залишаємо ту саму кнопку для повторної перевірки
-    keyboard = [
-        [InlineKeyboardButton("🔄 Перевірити знову", callback_data='check_light')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    # Відправляємо результат
-    await query.edit_message_text(
-        response,
-        reply_markup=reply_markup
-    )
-    
-    logger.info(f"Користувач {user.id} перевірив світло. Статус: {light_status}, Помилка: {error}")
+    except Exception as e:
+        logger.error(f"Помилка при перевірці світла: {e}")
+        await query.edit_message_text("❌ Сталася помилка під час перевірки світла.")
+
 
 # ================= ОСНОВНА ФУНКЦІЯ =================
 
