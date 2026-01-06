@@ -4,7 +4,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # Налаштування
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = '7507075036:AAGDt6Ycp9xOg3l9210kSLZoAkhgI1t2gqU' #os.getenv("BOT_TOKEN")
 
 # Налаштування логування
 logging.basicConfig(
