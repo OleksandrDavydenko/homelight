@@ -1,7 +1,7 @@
 import os
 import logging
 from telegram import Update
-from telegram.ext import Application, CommandHandler
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 # Налаштування логування
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -9,10 +9,10 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-async def start(update: Update, context):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Просто відповідає на /start"""
     user = update.effective_user
-    logger.info(f"Користувач {user.id} написав /start")
+    logger.info(f"Команда /start від користувача {user.id}")
     
     try:
         await update.message.reply_text(
@@ -24,8 +24,9 @@ async def start(update: Update, context):
         logger.error(f"Помилка при відповіді на /start: {e}")
         await update.message.reply_text("❌ Виникла помилка. Спробуйте ще раз.")
 
-async def test(update: Update, context):
+async def test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Тестова команда"""
+    logger.info("Команда /test отримана")
     try:
         await update.message.reply_text("✅ Бот працює!")
     except Exception as e:
@@ -40,7 +41,10 @@ def main():
         return
     
     try:
+        # Створення додатку бота
         app = Application.builder().token(BOT_TOKEN).build()
+        
+        # Додавання обробників команд
         app.add_handler(CommandHandler("start", start))
         app.add_handler(CommandHandler("test", test))
 
