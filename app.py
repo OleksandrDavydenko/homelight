@@ -33,7 +33,7 @@ def check_real_light_status():
         if not all([DEVICE_IP, LOCAL_KEY]):
             return None, "Не налаштовано IP або ключ розетки"
         
-        # === ПІДКЛЮЧЕННЯ ДО РОЗЕТКИ ===
+        # = ПІДКЛЮЧЕННЯ ДО РОЗЕТКИ =
         import tinytuya
         
         # Створюємо об'єкт пристрою
