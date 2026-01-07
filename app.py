@@ -71,35 +71,6 @@ async def button_callback(update: Update, context: CallbackContext) -> None:
                 reply_markup=reply_markup
             )
 
-async def help_command(update: Update, context: CallbackContext) -> None:
-    """Обробник команди /help"""
-    keyboard = [
-        [InlineKeyboardButton("🔌 Перевірити наявність електроенергії", callback_data='check_light')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    help_text = (
-        "Доступні команди:\n"
-        "/start - Почати роботу з ботом\n"
-        "/check - Перевірити наявність світла\n"
-        "/help - Показати це повідомлення\n\n"
-        "Просто натисніть кнопку нижче для перевірки."
-    )
-    
-    await update.message.reply_text(help_text, reply_markup=reply_markup)
-
-async def check_command(update: Update, context: CallbackContext) -> None:
-    """Обробник команди /check"""
-    keyboard = [
-        [InlineKeyboardButton("🔌 Перевірити наявність електроенергії", callback_data='check_light')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        "Натисніть кнопку для перевірки наявності електроенергії:",
-        reply_markup=reply_markup
-    )
-
 def main() -> None:
     """Запуск бота"""
     # Створюємо додаток
@@ -107,8 +78,6 @@ def main() -> None:
     
     # Додаємо обробники команд
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("check", check_command))
     
     # Додаємо обробник кнопок
     application.add_handler(CallbackQueryHandler(button_callback))

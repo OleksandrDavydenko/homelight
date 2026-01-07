@@ -1,6 +1,6 @@
 import tinytuya
 import time
-import json
+from datetime import datetime
 from config import ACCESS_ID, ACCESS_SECRET, DEVICE_ID, TUYA_REGION
 
 class LightChecker:
@@ -10,16 +10,10 @@ class LightChecker:
         self.device_id = DEVICE_ID
         self.region = TUYA_REGION
         
-    def check_light_status(self):
-        """Перевірка статусу світла - версія з детальним дебагом"""
+    def get_real_device_status(self):
+        """Отримання реального статусу пристрою з перевіркою онлайн статусу"""
         try:
-            print(f"🔧 DEBUG: Початок перевірки світла")
-            print(f"🔧 DEBUG: Access ID: {self.access_id[:10]}...")
-            print(f"🔧 DEBUG: Device ID: {self.device_id}")
-            print(f"🔧 DEBUG: Region: {self.region}")
-            
-            # Підключення до Tuya Cloud
-            print(f"🔧 DEBUG: Підключення до Tuya Cloud...")
+            # Підключаємося до європейського регіону
             cloud = tinytuya.Cloud(
                 apiRegion=self.region,
                 apiKey=self.access_id,
@@ -27,94 +21,173 @@ class LightChecker:
                 apiDeviceID=self.device_id
             )
             
-            # Отримуємо список пристроїв
-            print(f"🔧 DEBUG: Виклик cloud.getdevices()...")
-            response = cloud.getdevices()
+            # 1. Отримуємо інформацію про пристрій (де є поле 'online')
+            devices_info = cloud.getdevices(self.device_id)  # ЗАПАМ'ЯТАЙТЕ: передаємо ID!
             
-            # Детальний вивід відповіді
-            print(f"📡 DEBUG: Відповідь getdevices():")
-            print(f"📡 Тип відповіді: {type(response)}")
-            print(f"📡 Повна відповідь: {json.dumps(response, indent=2, ensure_ascii=False)}")
-            
-            # Визначаємо тип відповіді
-            if isinstance(response, list):
-                print(f"✅ DEBUG: Отримано список з {len(response)} пристроїв")
+            if devices_info and devices_info.get("success"):
+                devices_list = devices_info.get("result", [])
                 
-                # Успішно отримали список пристроїв
+                # Шукаємо нашу розетку
                 our_device = None
-                for idx, device in enumerate(response):
-                    if isinstance(device, dict):
-                        device_id = device.get("id", "немає")
-                        print(f"🔍 DEBUG: Пристрій #{idx+1}: ID={device_id}, Name={device.get('name')}")
-                        if device.get("id") == self.device_id:
-                            our_device = device
-                            print(f"🎯 DEBUG: Знайдено наш пристрій!")
+                for device in devices_list:
+                    if device.get("id") == self.device_id:
+                        our_device = device
+                        break
                 
                 if our_device:
-                    device_name = our_device.get("name", "Розетка")
-                    online = our_device.get("online", False)
-                    print(f"📱 DEBUG: Назва пристрою: {device_name}")
-                    print(f"🌐 DEBUG: Статус online: {online}")
+                    # КЛЮЧОВЕ: Перевіряємо онлайн статус
+                    online_status = our_device.get("online", False)
+                    update_time = our_device.get("update_time", 0)
+                    current_time = int(time.time())
                     
-                    if online:
-                        # Отримуємо детальний статус
-                        print(f"🔧 DEBUG: Виклик cloud.getstatus()...")
-                        status_response = cloud.getstatus(self.device_id)
-                        
-                        print(f"📡 DEBUG: Відповідь getstatus():")
-                        print(f"📡 Тип відповіді: {type(status_response)}")
-                        if isinstance(status_response, dict):
-                            print(f"📡 Повна відповідь: {json.dumps(status_response, indent=2, ensure_ascii=False)}")
-                        
-                        if isinstance(status_response, dict) and status_response.get("success"):
-                            print(f"✅ DEBUG: Успішно отримали статус пристрою")
-                            # Успішно отримали статус
-                            for idx, item in enumerate(status_response.get("result", [])):
-                                print(f"📊 DEBUG: Параметр #{idx+1}: {item}")
-                                if item.get("code") == "cur_voltage":
-                                    voltage = item.get("value", 0) / 10.0
-                                    print(f"⚡ DEBUG: Напруга: {voltage} В")
-                                    if voltage > 100:
-                                        return f"✅ СВІТЛО Є!\n\n📱 Пристрій: {device_name}\n🔌 Напруга: {voltage:.1f} В"
-                                    else:
-                                        return f"❌ СВІТЛА НЕМАЄ!\n\n📱 Пристрій: {device_name}\n🔌 Напруга: {voltage:.1f} В"
-                            
-                            # Якщо напругу не знайдено
-                            print(f"⚠️ DEBUG: Напругу не знайдено в відповіді")
-                            return f"⚠️ Пристрій онлайн\n📱 {device_name}\nℹ️ Напруга не визначена"
-                        else:
-                            # Помилка отримання статусу
-                            print(f"❌ DEBUG: Не вдалося отримати статус пристрою")
-                            return f"⚠️ Пристрій онлайн\n📱 {device_name}\nℹ️ Не вдалося отримати детальний статус"
+                    if not online_status:
+                        offline_minutes = (current_time - update_time) // 60
+                        return {
+                            "has_light": False,
+                            "online": False,
+                            "reason": "device_offline",
+                            "offline_since": update_time,
+                            "offline_minutes": offline_minutes,
+                            "device_name": our_device.get("name"),
+                            "ip_address": our_device.get("ip")
+                        }
                     else:
-                        # Пристрій офлайн
-                        update_time = our_device.get("update_time", 0)
-                        offline_min = (int(time.time()) - update_time) // 60
-                        print(f"🔴 DEBUG: Пристрій OFFLINE, офлайн {offline_min} хв.")
-                        return f"🔴 ПРИСТРІЙ OFFLINE\n\n📱 Пристрій: {device_name}\n⏱️ Офлайн вже: {offline_min} хв."
+                        # Якщо пристрій онлайн, перевіряємо реальні показники
+                        status_data = cloud.getstatus(self.device_id)
+                        
+                        if status_data and status_data.get("success"):
+                            return self.analyze_current_status(status_data, our_device)
+                        else:
+                            return {
+                                "has_light": None, 
+                                "online": True, 
+                                "reason": "status_unavailable",
+                                "device_name": our_device.get("name")
+                            }
                 else:
-                    # Пристрій не знайдено
-                    print(f"❌ DEBUG: Пристрій {self.device_id} не знайдено в списку")
-                    return "❌ Пристрій не знайдено"
-            
-            elif isinstance(response, dict):
-                print(f"📋 DEBUG: Отримано словник (можливо помилка)")
-                # Можливо, це помилка
-                if response.get("success") is False:
-                    error_msg = response.get("msg", "Невідома помилка")
-                    error_code = response.get("code", "немає")
-                    print(f"❌ DEBUG: Помилка Tuya: {error_msg}, код: {error_code}")
-                    return f"❌ Помилка Tuya: {error_msg}"
-                else:
-                    # Невідомий формат словника
-                    print(f"⚠️ DEBUG: Невідомий формат словника")
-                    return "❌ Невідомий формат відповіді"
+                    return {
+                        "has_light": None, 
+                        "online": None, 
+                        "reason": "device_not_found"
+                    }
             else:
-                print(f"⚠️ DEBUG: Невідомий тип відповіді: {type(response)}")
-                return "❌ Невідомий тип відповіді"
+                return {
+                    "has_light": None, 
+                    "online": None, 
+                    "reason": "api_error",
+                    "error_details": devices_info
+                }
                 
         except Exception as e:
-            print(f"💥 DEBUG: Виняток: {type(e).__name__}: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return f"❌ Помилка підключення: {str(e)}"
+            return {
+                "has_light": None, 
+                "online": None, 
+                "reason": f"connection_error: {str(e)}"
+            }
+    
+    def analyze_current_status(self, status_data, device_info):
+        """Аналіз поточного статусу пристрою"""
+        result = status_data.get("result", [])
+        
+        # Знаходимо ключові параметри
+        voltage = None
+        power = None
+        current = None
+        switch_state = None
+        
+        for item in result:
+            code = item.get("code")
+            value = item.get("value")
+            
+            if code == "cur_voltage":
+                voltage = value / 10  # Конвертуємо в вольти
+            elif code == "cur_power":
+                power = value / 10  # Конвертуємо в вати
+            elif code == "cur_current":
+                current = value / 1000  # Конвертуємо в ампери
+            elif code == "switch_1":
+                switch_state = value
+        
+        # Визначаємо, чи є світло
+        has_light = False
+        
+        if voltage is not None:
+            if voltage > 100:  # Якщо напруга більше 100В
+                if power is not None and power > 0:
+                    # Є напруга і споживання - точно є світло
+                    has_light = True
+                elif current is not None and current > 0:
+                    # Є напруга і струм - точно є світло
+                    has_light = True
+                else:
+                    # Є напруга, але немає споживання
+                    has_light = True  # Напруга є - припускаємо що світло є
+            else:
+                # Напруги немає або вона дуже низька
+                has_light = False
+        
+        return {
+            "has_light": has_light,
+            "online": device_info.get("online", False),
+            "voltage": voltage,
+            "power": power,
+            "current": current,
+            "switch_state": switch_state,
+            "device_name": device_info.get("name"),
+            "ip_address": device_info.get("ip"),
+            "timestamp": int(time.time())
+        }
+    
+    def check_light_status(self):
+        """Основна функція для перевірки статусу світла"""
+        status = self.get_real_device_status()
+        
+        # Формуємо зрозуміле повідомлення для користувача
+        if status.get("online") is False:
+            device_name = status.get("device_name", "Пристрій")
+            offline_minutes = status.get("offline_minutes", 0)
+            
+            if offline_minutes > 60:
+                hours = offline_minutes // 60
+                minutes = offline_minutes % 60
+                time_str = f"{hours} год {minutes} хв"
+            else:
+                time_str = f"{offline_minutes} хв"
+            
+            return (
+                f"🔴 ПРИСТРІЙ OFFLINE\n\n"
+                f"📱 Пристрій: {device_name}\n"
+                f"⏱️ Офлайн вже: {time_str}\n\n"
+                f"💡 ВИСНОВОК: Пристрій не підключений до інтернету"
+            )
+            
+        elif status.get("has_light") is True:
+            device_name = status.get("device_name", "Пристрій")
+            voltage = status.get("voltage", 0)
+            power = status.get("power", 0)
+            
+            message = f"✅ СВІТЛО Є!\n\n📱 Пристрій: {device_name}\n🔌 Напруга: {voltage:.1f} В"
+            
+            if power:
+                message += f"\n💡 Потужність: {power:.1f} Вт"
+            
+            return message
+            
+        elif status.get("has_light") is False:
+            device_name = status.get("device_name", "Пристрій")
+            voltage = status.get("voltage", 0)
+            
+            return (
+                f"❌ СВІТЛА НЕМАЄ!\n\n"
+                f"📱 Пристрій: {device_name}\n"
+                f"🔌 Напруга: {voltage:.1f} В\n\n"
+                f"💡 ВИСНОВОК: Напруги немає або вона занадто низька"
+            )
+            
+        elif status.get("reason") == "status_unavailable":
+            device_name = status.get("device_name", "Пристрій")
+            return f"⚠️ Пристрій онлайн\n📱 {device_name}\nℹ️ Дані про напругу недоступні"
+            
+        else:
+            reason = status.get("reason", "невідома причина")
+            return f"❌ Помилка: {reason}"
