@@ -32,7 +32,7 @@ def add_user(telegram_id, first_name, subscribed=False):
     cursor = conn.cursor()
 
     cursor.execute("""
-        INSERT INTO users (telegram_id, first_name, subscribed)
+        INSERT INTO usersLightBot (telegram_id, first_name, subscribed)
         VALUES (%s, %s, %s)
         ON CONFLICT (telegram_id) DO NOTHING;
     """, (telegram_id, first_name, subscribed))
@@ -47,7 +47,7 @@ def update_subscription(telegram_id, subscribed):
     cursor = conn.cursor()
 
     cursor.execute("""
-        UPDATE users
+        UPDATE usersLightBot
         SET subscribed = %s
         WHERE telegram_id = %s;
     """, (subscribed, telegram_id))
@@ -62,7 +62,7 @@ def get_user_subscription(telegram_id):
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT subscribed FROM users WHERE telegram_id = %s;
+        SELECT subscribed FROM usersLightBot WHERE telegram_id = %s;
     """, (telegram_id,))
     
     result = cursor.fetchone()
