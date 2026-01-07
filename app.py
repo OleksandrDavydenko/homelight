@@ -20,9 +20,10 @@ logger = logging.getLogger(__name__)
 light_checker = LightChecker()
 
 async def send_welcome_message(update: Update, context: CallbackContext) -> None:
-    """Відправка повідомлення з кнопкою 'Перевірити наявність електроенергії' при вході в чат"""
+    """Відправка повідомлення з кнопкою 'Підписатись' при вході в чат"""
     user = update.effective_user
     keyboard = [
+        [InlineKeyboardButton("Підписатись", callback_data='subscribe')],
         [InlineKeyboardButton("🔌 Перевірити наявність електроенергії", callback_data='check_light')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -30,7 +31,7 @@ async def send_welcome_message(update: Update, context: CallbackContext) -> None
     welcome_message = (
         f"👋 Вітаю, {user.first_name}!\n\n"
         "Я бот для перевірки наявності електроенергії.\n"
-        "Натисніть кнопку нижче, щоб перевірити статус."
+        "Натисніть кнопку 'Підписатись' або 'Перевірити наявність електроенергії'."
     )
 
     await update.message.reply_text(welcome_message, reply_markup=reply_markup)
@@ -101,7 +102,7 @@ async def check_command(update: Update, context: CallbackContext) -> None:
 
 async def chat_member_handler(update: Update, context: CallbackContext) -> None:
     """Обробник подій зміни статусу користувача в чаті"""
-    # Якщо користувач приєднався до чату, відправляємо йому кнопку "Перевірити наявність електроенергії"
+    # Якщо користувач приєднався до чату, відправляємо йому кнопку "Підписатись"
     if update.chat_member.new_chat_member.status == "member":
         await send_welcome_message(update, context)
 
