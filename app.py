@@ -23,12 +23,12 @@ def get_subscription_keyboard(telegram_id):
     
     if user_subscribed:  # Якщо користувач підписаний
         return [
-            [KeyboardButton("Відписатись")],
+            [KeyboardButton("🔕 Відписатись")],
             [KeyboardButton("🔌 Перевірити наявність електроенергії")]
         ]
     else:  # Якщо користувач не підписаний
         return [
-            [KeyboardButton("Підписатись")],
+            [KeyboardButton("🔔 Підписатись")],
             [KeyboardButton("🔌 Перевірити наявність електроенергії")]
         ]
 
@@ -120,7 +120,7 @@ async def handle_text_message(update: Update, context: CallbackContext) -> None:
     first_name = update.effective_user.first_name or ''
 
     try:
-        if text == 'Підписатись':
+        if text == '🔔 Підписатись':
             logger.info("handle_text_message: subscribe requested for %s", telegram_id)
             await asyncio.to_thread(add_user, telegram_id, first_name, True)
             logger.info("handle_text_message: subscribe finished for %s", telegram_id)
@@ -129,7 +129,7 @@ async def handle_text_message(update: Update, context: CallbackContext) -> None:
             keyboard = get_subscription_keyboard(telegram_id)
             reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
             await update.message.reply_text('Натисніть для подальших дій:', reply_markup=reply_markup)
-        elif text == 'Відписатись':
+        elif text == '🔕 Відписатись':
             logger.info("handle_text_message: unsubscribe requested for %s", telegram_id)
             await asyncio.to_thread(update_subscription, telegram_id, False)
             logger.info("handle_text_message: unsubscribe finished for %s", telegram_id)
