@@ -23,11 +23,13 @@ def get_subscription_keyboard(telegram_id):
     
     if user_subscribed:  # Якщо користувач підписаний
         return [
-            [KeyboardButton("Відписатись")]
+            [KeyboardButton("Відписатись")],
+            [KeyboardButton("🔌 Перевірити наявність електроенергії")]
         ]
     else:  # Якщо користувач не підписаний
         return [
-            [KeyboardButton("Підписатись")]
+            [KeyboardButton("Підписатись")],
+            [KeyboardButton("🔌 Перевірити наявність електроенергії")]
         ]
 
 # Обробка команди /start або коли користувач тільки приєднується до бота
@@ -36,20 +38,14 @@ async def send_welcome_message(update: Update, context: CallbackContext) -> None
     user = update.effective_user
     telegram_id = user.id
 
-    # Отримуємо клавіатуру з кнопкою 'Підписатись' або 'Відписатись'
+    # Отримуємо клавіатуру з кнопками 'Підписатись'/'Відписатись' і 'Перевірити'
     keyboard = get_subscription_keyboard(telegram_id)
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-
-    # Кнопка "Перевірити наявність електроенергії" — InlineButton для кнопки в повідомленні
-    inline_keyboard = [
-        [InlineKeyboardButton("🔌 Перевірити наявність електроенергії", callback_data='check_light')]
-    ]
-    inline_reply_markup = InlineKeyboardMarkup(inline_keyboard)
 
     welcome_message = (
         f"👋 Вітаю, {user.first_name}!\n\n"
         "Я бот для перевірки наявності електроенергії.\n"
-        "Натисніть кнопку 'Підписатись' або 'Перевірити наявність електроенергії'."
+        "Натисніть на потрібну кнопку."
     )
 
     # Додаємо/оновлюємо користувача в базі (неблокуюче)
@@ -58,10 +54,8 @@ async def send_welcome_message(update: Update, context: CallbackContext) -> None
     except Exception:
         logger.exception("Не вдалося додати або оновити користувача в базі")
 
-    # Відправка привітального повідомлення з кнопкою "Підписатись" або "Відписатись" в полі вводу
+    # Відправка привітального повідомлення з кнопками
     await update.message.reply_text(welcome_message, reply_markup=reply_markup)
-    # Додаємо кнопку "Перевірити наявність електроенергії" в повідомленні
-    await update.message.reply_text("Натисніть для перевірки", reply_markup=inline_reply_markup)
 
 # Обробка натискання на кнопку "Підписатись" або "Відписатись"
 async def subscription_button_callback(update: Update, context: CallbackContext) -> None:
@@ -138,9 +132,19 @@ async def handle_text_message(update: Update, context: CallbackContext) -> None:
             keyboard = get_subscription_keyboard(telegram_id)
             reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
             await update.message.reply_text('Натисніть для подальших дій:', reply_markup=reply_markup)
+        elif text == '🔌 Перевірити наявність електроенергії':
+            await update.message.reply_text("🔄 Перевіряю наявність електроенергії...")
+            try:
+                # Виконуємо перевірку
+                result = light_checker.check_light_status()
+                # Надсилаємо нове повідомлення з результатом
+                await update.message.reply_text(f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ:\n\n{result}")
+            except Exception as e:
+                logger.error(f"Помилка при перевірці світла: {e}")
+                await update.message.reply_text("❌ Сталася помилка при перевірці. Спробуйте пізніше.")
     except Exception as e:
-        logger.exception(f"Помилка при обробці підписки: {e}")
-        await update.message.reply_text('Сталася помилка при зміні підписки. Спробуйте пізніше.')
+        logger.exception(f"Помилка при обробці повідомлення: {e}")
+        await update.message.reply_text('Сталася помилка. Спробуйте пізніше.')
 
 async def help_command(update: Update, context: CallbackContext) -> None:
     """Обробник команди /help"""
