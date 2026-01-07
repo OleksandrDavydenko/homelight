@@ -7,3 +7,5 @@ DEVICE_ID = os.getenv("DEVICE_ID", "")
 
 # Налаштування Telegram бота
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+
+TUYA_REGION = os.getenv("TUYA_REGION", "eu")
