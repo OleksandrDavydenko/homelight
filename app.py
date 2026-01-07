@@ -35,19 +35,15 @@ def get_subscription_keyboard(telegram_id):
         ]
 
 
-def set_bot_menu_sync(app):
-    """Синхронне додавання команд у меню бота.
-
-    Викликається перед запуском polling, встановлює основні команди.
-    """
+async def set_bot_menu(app):
+    """Асинхронне додавання команд у меню бота після ініціалізації додатку."""
     commands = [
         BotCommand("start", "Почати роботу з ботом"),
         BotCommand("check", "Перевірити наявність світла"),
         BotCommand("help", "Показати довідку")
     ]
     try:
-        import asyncio
-        asyncio.run(app.bot.set_my_commands(commands))
+        await app.bot.set_my_commands(commands)
         logger.info("Bot menu commands set successfully")
     except Exception as e:
         logger.exception("Failed to set bot menu commands: %s", e)
@@ -218,8 +214,7 @@ async def chat_member_handler(update: Update, context: CallbackContext) -> None:
 def main() -> None:
     """Запуск бота"""
     # Створюємо додаток
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    set_bot_menu_sync(application)
+    application = Application.builder().token(TELEGRAM_TOKEN).post_init(set_bot_menu).build()
 
     # Додаємо обробники команд
     application.add_handler(CommandHandler("start", send_welcome_message))
