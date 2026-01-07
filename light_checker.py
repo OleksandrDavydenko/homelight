@@ -76,7 +76,7 @@ class LightChecker:
                         try:
                             tz = ZoneInfo(TIMEZONE)
                             last_seen_dt = datetime.fromtimestamp(update_time, tz=timezone.utc).astimezone(tz)
-                            last_seen = last_seen_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+                            last_seen = last_seen_dt.strftime("%Y-%m-%d %H:%M:%S")
                         except Exception:
                             last_seen = datetime.fromtimestamp(update_time).strftime("%Y-%m-%d %H:%M:%S")
                         seconds_ago = current_time - update_time
@@ -418,7 +418,7 @@ class LightChecker:
         # Додаємо заголовок з поточним часом у відповідній часовій зоні
         try:
             tz = ZoneInfo(TIMEZONE)
-            current_time = datetime.now(tz).strftime("%d.%m.%Y %H:%M:%S %Z")
+            current_time = datetime.now(tz).strftime("%d.%m.%Y %H:%M:%S")
         except Exception:
             current_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
         final_result = f"📊 ПЕРЕВІРКА: {current_time}\n\n{result}"
