@@ -1,6 +1,6 @@
 import logging
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, CallbackContext, ChatMemberHandler, MessageHandler, filters
 from light_checker import LightChecker  # Переконайтесь, що ви імпортуєте цей клас
 from config import TELEGRAM_TOKEN
@@ -34,6 +34,24 @@ def get_subscription_keyboard(telegram_id):
             [KeyboardButton("ℹ️ Довідка")]
         ]
 
+
+def set_bot_menu_sync(app):
+    """Синхронне додавання команд у меню бота.
+
+    Викликається перед запуском polling, встановлює основні команди.
+    """
+    commands = [
+        BotCommand("start", "Почати роботу з ботом"),
+        BotCommand("check", "Перевірити наявність світла"),
+        BotCommand("help", "Показати довідку")
+    ]
+    try:
+        import asyncio
+        asyncio.run(app.bot.set_my_commands(commands))
+        logger.info("Bot menu commands set successfully")
+    except Exception as e:
+        logger.exception("Failed to set bot menu commands: %s", e)
+
 # Обробка команди /start або коли користувач тільки приєднується до бота
 async def send_welcome_message(update: Update, context: CallbackContext) -> None:
     """Відправка повідомлення з кнопкою 'Підписатись' або 'Відписатись' при вході в чат"""
@@ -46,7 +64,7 @@ async def send_welcome_message(update: Update, context: CallbackContext) -> None
 
     welcome_message = (
         f"👋 Вітаю, {user.first_name}!\n\n"
-        "Я бот для перевірки наявності електроенергії.\n"
+        "Я бот для перевірки наявності електроенергії в будинку на Полтавській 64.\n"
         "Натисніть на потрібну кнопку."
     )
 
@@ -152,10 +170,9 @@ async def handle_text_message(update: Update, context: CallbackContext) -> None:
                 await update.message.reply_text("❌ Сталася помилка при перевірці. Спробуйте пізніше.")
         elif text == 'ℹ️ Довідка':
             info_text = (
-                "Я бот для перевірки наявності електроенергії.\n\n"
-                "- Можу перевірити стан через розетку Tuya і показати напругу/потужність.\n"
+                "Я бот для перевірки наявності електроенергії в будинку на Полтавській 64.\n\n"
                 "- Можна натиснути '🔌 Перевірити наявність електроенергії' для миттєвої перевірки.\n"
-                "- Натисніть '🔔 Підписатись' щоб отримувати повідомлення при зміні статусу, або '🔕 Відписатись' щоб вимкнути сповіщення.\n\n"
+                "- Натисніть '🔔 Підписатись' щоб отримувати повідомлення при зміни статусу, або '🔕 Відписатись' щоб вимкнути сповіщення.\n\n"
                 "Якщо потрібна допомога — напишіть /help"
             )
             await update.message.reply_text(info_text)
