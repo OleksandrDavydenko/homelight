@@ -1,9 +1,9 @@
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, CallbackContext, ChatMemberHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, CallbackContext, ChatMemberHandler, MessageHandler, filters
 from light_checker import LightChecker  # Переконайтесь, що ви імпортуєте цей клас
 from config import TELEGRAM_TOKEN
-from db import get_user_subscription, update_subscription  # Потрібні функції для роботи з БД
+from db import get_user_subscription, update_subscription, add_user  # Потрібні функції для роботи з БД
 
 # Налаштування логування
 logging.basicConfig(
@@ -50,6 +50,12 @@ async def send_welcome_message(update: Update, context: CallbackContext) -> None
         "Я бот для перевірки наявності електроенергії.\n"
         "Натисніть кнопку 'Підписатись' або 'Перевірити наявність електроенергії'."
     )
+
+    # Додаємо/оновлюємо користувача в базі (неблокуюче)
+    try:
+        await context.application.run_in_executor(None, add_user, telegram_id, user.first_name, False)
+    except Exception:
+        logger.exception("Не вдалося додати або оновити користувача в базі")
 
     # Відправка привітального повідомлення з кнопкою "Підписатись" або "Відписатись" в полі вводу
     await update.message.reply_text(welcome_message, reply_markup=reply_markup)
@@ -106,6 +112,27 @@ async def subscription_button_callback(update: Update, context: CallbackContext)
         # Оновлюємо кнопку на протилежну
         await send_welcome_message(update, context)
 
+
+async def handle_text_message(update: Update, context: CallbackContext) -> None:
+    """Обробник текстових повідомлень для ReplyKeyboardMarkup кнопок 'Підписатись'/'Відписатись'"""
+    if not update.message or not update.effective_user:
+        return
+
+    text = update.message.text.strip()
+    telegram_id = update.effective_user.id
+    first_name = update.effective_user.first_name or ''
+
+    try:
+        if text == 'Підписатись':
+            await context.application.run_in_executor(None, add_user, telegram_id, first_name, True)
+            await update.message.reply_text('✅ Ви підписалися на отримання оновлень.')
+        elif text == 'Відписатись':
+            await context.application.run_in_executor(None, update_subscription, telegram_id, False)
+            await update.message.reply_text('❌ Ви відписалися від отримання оновлень.')
+    except Exception as e:
+        logger.exception(f"Помилка при обробці підписки: {e}")
+        await update.message.reply_text('Сталася помилка при зміні підписки. Спробуйте пізніше.')
+
 async def help_command(update: Update, context: CallbackContext) -> None:
     """Обробник команди /help"""
     keyboard = [
@@ -156,6 +183,9 @@ def main() -> None:
 
     # Додаємо обробник кнопок
     application.add_handler(CallbackQueryHandler(subscription_button_callback))
+
+    # Обробник текстових повідомлень (клавіатура ReplyKeyboardMarkup)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
 
     # Запускаємо бота
     print("🤖 Бот запущено...")
