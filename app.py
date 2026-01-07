@@ -1,7 +1,7 @@
 import logging
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, BotCommand
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, CallbackContext, ChatMemberHandler, MessageHandler, filters
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, BotCommand
+from telegram.ext import Application, CommandHandler, CallbackContext, ChatMemberHandler, MessageHandler, filters
 from light_checker import LightChecker  # Переконайтесь, що ви імпортуєте цей клас
 from config import TELEGRAM_TOKEN
 from db import get_user_subscription, update_subscription, add_user  # Потрібні функції для роботи з БД
@@ -83,56 +83,7 @@ async def send_welcome_message(update: Update, context: CallbackContext) -> None
     # Відправка привітального повідомлення з кнопками
     await update.message.reply_text(welcome_message, reply_markup=reply_markup)
 
-# Обробка натискання на кнопку "Підписатись" або "Відписатись"
-async def subscription_button_callback(update: Update, context: CallbackContext) -> None:
-    """Обробник натискання на кнопку 'Підписатись' або 'Відписатись'"""
-    query = update.callback_query
-    await query.answer()
 
-    telegram_id = update.effective_user.id
-    user_subscribed = get_user_subscription(telegram_id)
-
-    if query.data == 'check_light':
-        await query.edit_message_text(text="🔄 Перевіряю наявність електроенергії...")
-
-        try:
-            # Виконуємо перевірку
-            result = light_checker.check_light_status()
-
-            # Формуємо нову клавіатуру
-            keyboard = [
-                [InlineKeyboardButton("🔄 Перевірити ще раз", callback_data='check_light')]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-
-            # Оновлюємо повідомлення з результатом
-            await query.edit_message_text(
-                text=f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ:\n\n{result}",
-                reply_markup=reply_markup
-            )
-
-        except Exception as e:
-            logger.error(f"Помилка при перевірці світла: {e}")
-            keyboard = [
-                [InlineKeyboardButton("🔄 Спробувати ще раз", callback_data='check_light')]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await query.edit_message_text(
-                text="❌ Сталася помилка при перевірці. Спробуйте пізніше.",
-                reply_markup=reply_markup
-            )
-        
-    elif query.data == 'subscribe' or query.data == 'unsubscribe':
-        # Виконуємо строгий чек — тільки реальний True означає підписку
-        if user_subscribed is True:  # Якщо підписаний, відписуємо
-            await asyncio.to_thread(update_subscription, telegram_id, False)
-            await query.edit_message_text("❌ Ви відписалися від отримання оновлень.")
-        else:  # Якщо не підписаний, підписуємо
-            await asyncio.to_thread(update_subscription, telegram_id, True)
-            await query.edit_message_text("✅ Ви підписалися на отримання оновлень.")
-
-        # Оновлюємо кнопку на протилежну
-        await send_welcome_message(update, context)
 
 
 async def handle_text_message(update: Update, context: CallbackContext) -> None:
@@ -166,8 +117,8 @@ async def handle_text_message(update: Update, context: CallbackContext) -> None:
         elif text == '🔌 Перевірити наявність електроенергії':
             await update.message.reply_text("🔄 Перевіряю наявність електроенергії...")
             try:
-                # Виконуємо перевірку
-                result = light_checker.check_light_status()
+                # Виконуємо перевірку в потоці, щоб не блокувати event loop
+                result = await asyncio.to_thread(light_checker.check_light_status)
                 # Надсилаємо нове повідомлення з результатом
                 await update.message.reply_text(f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ:\n\n{result}")
             except Exception as e:
@@ -187,32 +138,26 @@ async def handle_text_message(update: Update, context: CallbackContext) -> None:
 
 async def help_command(update: Update, context: CallbackContext) -> None:
     """Обробник команди /help"""
-    keyboard = [
-        [InlineKeyboardButton("🔌 Перевірити наявність електроенергії", callback_data='check_light')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     help_text = (
         "Доступні команди:\n"
         "/start - Почати роботу з ботом\n"
         "/check - Перевірити наявність світла\n"
         "/help - Показати це повідомлення\n\n"
-        "Просто натисніть кнопку нижче для перевірки."
+        "Ви також можете натиснути кнопку '🔌 Перевірити наявність електроенергії' у клавіатурі."
     )
 
-    await update.message.reply_text(help_text, reply_markup=reply_markup)
+    await update.message.reply_text(help_text)
 
 async def check_command(update: Update, context: CallbackContext) -> None:
     """Обробник команди /check"""
-    keyboard = [
-        [InlineKeyboardButton("🔌 Перевірити наявність електроенергії", callback_data='check_light')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await update.message.reply_text(
-        "Натисніть кнопку для перевірки наявності електроенергії:",
-        reply_markup=reply_markup
-    )
+    # Поводимося так само, як при натисканні кнопки клавіатури
+    await update.message.reply_text("🔄 Перевіряю наявність електроенергії...")
+    try:
+        result = await asyncio.to_thread(light_checker.check_light_status)
+        await update.message.reply_text(f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ:\n\n{result}")
+    except Exception as e:
+        logger.error(f"Помилка при перевірці світла: {e}")
+        await update.message.reply_text("❌ Сталася помилка при перевірці. Спробуйте пізніше.")
 
 async def chat_member_handler(update: Update, context: CallbackContext) -> None:
     """Обробник подій зміни статусу користувача в чаті"""
@@ -232,9 +177,6 @@ def main() -> None:
 
     # Додаємо обробник зміни статусу члена чату (коли користувач приєднується)
     application.add_handler(ChatMemberHandler(chat_member_handler))  # Правильний спосіб
-
-    # Додаємо обробник кнопок
-    application.add_handler(CallbackQueryHandler(subscription_button_callback))
 
     # Обробник текстових повідомлень (клавіатура ReplyKeyboardMarkup)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
