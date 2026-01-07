@@ -3,6 +3,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, CallbackContext, ChatMemberHandler
 from light_checker import LightChecker  # Переконайтесь, що ви імпортуєте цей клас
 from config import TELEGRAM_TOKEN
+from db import get_user_subscription, update_subscription  # Потрібні функції для роботи з БД
 
 # Налаштування логування
 logging.basicConfig(
@@ -14,15 +15,28 @@ logger = logging.getLogger(__name__)
 # Ініціалізація LightChecker
 light_checker = LightChecker()
 
+# Функція для створення кнопки підписки/відписки
+def get_subscription_keyboard(telegram_id):
+    """Отримання клавіатури з кнопкою 'Підписатись' або 'Відписатись' залежно від статусу"""
+    user_subscribed = get_user_subscription(telegram_id)
+    
+    if user_subscribed:  # Якщо користувач підписаний
+        return [
+            [KeyboardButton("Відписатись")]
+        ]
+    else:  # Якщо користувач не підписаний
+        return [
+            [KeyboardButton("Підписатись")]
+        ]
+
 # Обробка команди /start або коли користувач тільки приєднується до бота
 async def send_welcome_message(update: Update, context: CallbackContext) -> None:
-    """Відправка повідомлення з кнопкою 'Підписатись' при вході в чат"""
+    """Відправка повідомлення з кнопкою 'Підписатись' або 'Відписатись' при вході в чат"""
     user = update.effective_user
+    telegram_id = user.id
 
-    # Кнопка "Підписатись" — KeyboardButton для виведення внизу
-    keyboard = [
-        [KeyboardButton("Підписатись")]  # Це кнопка в рядку вводу
-    ]
+    # Отримуємо клавіатуру з кнопкою 'Підписатись' або 'Відписатись'
+    keyboard = get_subscription_keyboard(telegram_id)
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
     # Кнопка "Перевірити наявність електроенергії" — InlineButton для кнопки в повідомленні
@@ -37,15 +51,19 @@ async def send_welcome_message(update: Update, context: CallbackContext) -> None
         "Натисніть кнопку 'Підписатись' або 'Перевірити наявність електроенергії'."
     )
 
-    # Відправка привітального повідомлення з кнопкою "Підписатись" в полі вводу
+    # Відправка привітального повідомлення з кнопкою "Підписатись" або "Відписатись" в полі вводу
     await update.message.reply_text(welcome_message, reply_markup=reply_markup)
     # Додаємо кнопку "Перевірити наявність електроенергії" в повідомленні
     await update.message.reply_text("Натисніть для перевірки", reply_markup=inline_reply_markup)
 
-async def button_callback(update: Update, context: CallbackContext) -> None:
-    """Обробник натискання на кнопки"""
+# Обробка натискання на кнопку "Підписатись" або "Відписатись"
+async def subscription_button_callback(update: Update, context: CallbackContext) -> None:
+    """Обробник натискання на кнопку 'Підписатись' або 'Відписатись'"""
     query = update.callback_query
     await query.answer()
+
+    telegram_id = update.effective_user.id
+    user_subscribed = get_user_subscription(telegram_id)
 
     if query.data == 'check_light':
         await query.edit_message_text(text="🔄 Перевіряю наявність електроенергії...")
@@ -76,6 +94,17 @@ async def button_callback(update: Update, context: CallbackContext) -> None:
                 text="❌ Сталася помилка при перевірці. Спробуйте пізніше.",
                 reply_markup=reply_markup
             )
+        
+    elif query.data == 'subscribe' or query.data == 'unsubscribe':
+        if user_subscribed:  # Якщо підписаний, відписуємо
+            update_subscription(telegram_id, False)
+            await query.edit_message_text("❌ Ви відписалися від отримання оновлень.")
+        else:  # Якщо не підписаний, підписуємо
+            update_subscription(telegram_id, True)
+            await query.edit_message_text("✅ Ви підписалися на отримання оновлень.")
+
+        # Оновлюємо кнопку на протилежну
+        await send_welcome_message(update, context)
 
 async def help_command(update: Update, context: CallbackContext) -> None:
     """Обробник команди /help"""
@@ -126,7 +155,7 @@ def main() -> None:
     application.add_handler(ChatMemberHandler(chat_member_handler))  # Правильний спосіб
 
     # Додаємо обробник кнопок
-    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(CallbackQueryHandler(subscription_button_callback))
 
     # Запускаємо бота
     print("🤖 Бот запущено...")
