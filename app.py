@@ -50,7 +50,9 @@ async def send_welcome_message(update: Update, context: CallbackContext) -> None
 
     # Додаємо/оновлюємо користувача в базі (неблокуюче)
     try:
+        logger.info("send_welcome_message: upsert user %s (first_name=%s) subscribed=False", telegram_id, user.first_name)
         await asyncio.to_thread(add_user, telegram_id, user.first_name, False)
+        logger.info("send_welcome_message: upsert finished for %s", telegram_id)
     except Exception:
         logger.exception("Не вдалося додати або оновити користувача в базі")
 
@@ -119,14 +121,18 @@ async def handle_text_message(update: Update, context: CallbackContext) -> None:
 
     try:
         if text == 'Підписатись':
+            logger.info("handle_text_message: subscribe requested for %s", telegram_id)
             await asyncio.to_thread(add_user, telegram_id, first_name, True)
+            logger.info("handle_text_message: subscribe finished for %s", telegram_id)
             await update.message.reply_text('✅ Ви підписалися на отримання оновлень.')
             # Оновлюємо клавіатуру з новою кнопкою
             keyboard = get_subscription_keyboard(telegram_id)
             reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
             await update.message.reply_text('Натисніть для подальших дій:', reply_markup=reply_markup)
         elif text == 'Відписатись':
+            logger.info("handle_text_message: unsubscribe requested for %s", telegram_id)
             await asyncio.to_thread(update_subscription, telegram_id, False)
+            logger.info("handle_text_message: unsubscribe finished for %s", telegram_id)
             await update.message.reply_text('❌ Ви відписалися від отримання оновлень.')
             # Оновлюємо клавіатуру з новою кнопкою
             keyboard = get_subscription_keyboard(telegram_id)
