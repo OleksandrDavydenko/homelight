@@ -336,10 +336,9 @@ class LightChecker:
             offline_duration = self.format_duration(offline_minutes)
             
             result = (
-                f"🔴 СТАН: НЕМАЄ ЗВ'ЯЗКУ\n\n"
-                f"⏱️ Пристрій відключений: {offline_duration}\n"
+                f"🔴 СТАН: НЕМАЄ СВІТЛА\n\n"
+                f"⏱️ Час відключення: {offline_duration}\n"
                 f"{time_info}\n\n"
-                f"💡 Розетка не підключена до інтернету"
             )
             
         elif status.get("has_light") is True:
