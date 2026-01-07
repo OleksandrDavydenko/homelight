@@ -1,175 +1,95 @@
-import os
 import logging
-from datetime import datetime
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-
-# ================= НАЛАШТУВАННЯ =================
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+from telegram import Update, ReplyKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackContext,
+    filters
+)
+from light_checker import LightChecker
+from config import TELEGRAM_TOKEN
 
 # Налаштування логування
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ================= РЕАЛЬНА ПЕРЕВІРКА СВІТЛА =================
+# Ініціалізація перевірки світла
+light_checker = LightChecker()
 
-def check_real_light_status():
-    """
-    РЕАЛЬНА перевірка наявності світла через розетку Tuya
-    Потрібно налаштувати параметри:
-    1. DEVICE_ID - ID вашої розетки
-    2. DEVICE_IP - IP розетки в мережі  
-    3. LOCAL_KEY - ключ розетки
-    """
-    try:
-        # === ПАРАМЕТРИ ДЛЯ ПІДКЛЮЧЕННЯ ===
-        DEVICE_ID = "bf3112f230a24fbeb6xvhp"  # Ваш Device ID
-        DEVICE_IP = os.getenv("DEVICE_IP")     # IP з Heroku config
-        LOCAL_KEY = os.getenv("LOCAL_KEY")     # Local Key з Heroku config
-        
-        if not all([DEVICE_IP, LOCAL_KEY]):
-            return None, "Не налаштовано IP або ключ розетки"
-        
-        # === ПІДКЛЮЧЕННЯ ДО РОЗЕТКИ ===
-        import tinytuya # type: ignore
-        
-        # Створюємо об'єкт пристрою
-        device = tinytuya.OutletDevice(DEVICE_ID, DEVICE_IP, LOCAL_KEY)
-        device.set_version(3.3)  # Версія протоколу
-        
-        # Отримуємо статус
-        logger.info(f"Перевіряю розетку {DEVICE_ID} на IP {DEVICE_IP}")
-        data = device.status()
-        
-        # Аналізуємо відповідь
-        if 'dps' in data:
-            # Шукаємо статус перемикача (зазвичай ключ '1' або 'switch')
-            for key, value in data['dps'].items():
-                logger.info(f"Ключ: {key}, Значення: {value}")
-                if key == '1' or 'switch' in str(key).lower():
-                    light_on = bool(value)
-                    logger.info(f"Світло: {'УВІМКНЕНО' if light_on else 'ВИМКНЕНО'}")
-                    return light_on, None
-            
-            return None, "Не знайдено статус перемикача у відповіді"
-        else:
-            return None, "Невірна відповідь від розетки"
-            
-    except ImportError:
-        return None, "Бібліотека tinytuya не встановлена. Додайте до requirements.txt"
-    except Exception as e:
-        logger.error(f"Помилка перевірки: {e}")
-        return None, f"Помилка: {str(e)}"
+# Створюємо клавіатуру з однією кнопкою
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [["🔌 Перевірити наявність електроенергії"]],
+    resize_keyboard=True,
+    one_time_keyboard=False
+)
 
-# ================= TELEGRAM БОТ =================
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start - показує одну кнопку"""
+async def start(update: Update, context: CallbackContext) -> None:
+    """Обробник команди /start"""
     user = update.effective_user
-    
-    # Тільки одна кнопка
-    keyboard = [
-        [InlineKeyboardButton("🔍 Перевірити чи є світло", callback_data='check_light')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(
-        f"Привіт, {user.first_name}!\n\n"
-        "Натисни кнопку нижче, щоб перевірити наявність світла:",
-        reply_markup=reply_markup
+    welcome_message = (
+        f"👋 Вітаю, {user.first_name}!\n\n"
+        "Я бот для перевірки наявності електроенергії.\n"
+        "Натисніть кнопку нижче, щоб перевірити статус."
     )
     
-    logger.info(f"Користувач {user.id} запустив бота")
+    await update.message.reply_text(
+        welcome_message,
+        reply_markup=MAIN_KEYBOARD
+    )
 
-async def check_light_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обробник кнопки - реальна перевірка світла"""
-    query = update.callback_query
-    user = query.from_user
+async def check_light(update: Update, context: CallbackContext) -> None:
+    """Обробник для перевірки світла"""
+    # Відправляємо повідомлення про початок перевірки
+    processing_message = await update.message.reply_text(
+        "🔄 Перевіряю наявність електроенергії...",
+        reply_markup=MAIN_KEYBOARD
+    )
     
-    # Відразу відправляємо підтвердження користувачу, що запит отримано
-    await query.answer("🔍 Перевіряю наявність світла...")
-
     try:
-        # РЕАЛЬНА перевірка світла
-        light_status, error = check_real_light_status()
-        current_time = datetime.now().strftime("%H:%M:%S")
+        # Виконуємо перевірку
+        result = light_checker.check_light_status()
         
-        # Формуємо відповідь
-        if error:
-            response = (
-                f"⚠️ **Не вдалося перевірити світло**\n\n"
-                f"Час: {current_time}\n"
-                f"Помилка: {error}\n\n"
-                f"Переконайтесь, що розетка налаштована."
-            )
-        else:
-            if light_status:
-                response = (
-                    f"✅ **СВІТЛО Є!**\n\n"
-                    f"Час перевірки: {current_time}\n"
-                    f"Статус: Розетка увімкнена\n"
-                    f"Користувач: {user.first_name}\n\n"
-                    f"⚡ Електропостачання в нормі."
-                )
-            else:
-                response = (
-                    f"❌ **СВІТЛА НЕМА!**\n\n"
-                    f"Час перевірки: {current_time}\n"
-                    f"Статус: Розетка вимкнена\n"
-                    f"Користувач: {user.first_name}\n\n"
-                    f"💡 Перевірте автоматичні вимикачі."
-                )
-
-        # Залишаємо ту саму кнопку для повторної перевірки
-        keyboard = [
-            [InlineKeyboardButton("🔄 Перевірити знову", callback_data='check_light')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        # Відправляємо результат
-        await query.edit_message_text(
-            response,
-            reply_markup=reply_markup
+        # Редагуємо попереднє повідомлення з результатом
+        await processing_message.edit_text(
+            f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ:\n\n{result}",
+            reply_markup=MAIN_KEYBOARD
         )
         
-        logger.info(f"Користувач {user.id} перевірив світло. Статус: {light_status}, Помилка: {error}")
-    
     except Exception as e:
         logger.error(f"Помилка при перевірці світла: {e}")
-        await query.edit_message_text("❌ Сталася помилка під час перевірки світла.")
+        await processing_message.edit_text(
+            "❌ Сталася помилка при перевірці. Спробуйте пізніше.",
+            reply_markup=MAIN_KEYBOARD
+        )
 
-
-# ================= ОСНОВНА ФУНКЦІЯ =================
-
-def main():
-    """Запуск бота"""
-    if not BOT_TOKEN:
-        logger.error("❌ BOT_TOKEN не знайдено!")
-        raise ValueError("Додайте BOT_TOKEN у змінні середовища Heroku")
+async def handle_message(update: Update, context: CallbackContext) -> None:
+    """Обробник текстових повідомлень"""
+    text = update.message.text
     
-    try:
-        # Створюємо додаток
-        application = Application.builder().token(BOT_TOKEN).build()
-        
-        # Тільки дві команди:
-        # 1. /start - показує кнопку
-        # 2. Обробник кнопки
-        application.add_handler(CommandHandler("start", start_command))
-        application.add_handler(CallbackQueryHandler(check_light_button, pattern='check_light'))
-        
-        logger.info("✅ Бот запускається...")
-        logger.info("📱 Доступні команди: /start")
-        logger.info("🔘 Одна кнопка: 'Перевірити чи є світло'")
-        
-        # Запускаємо
-        application.run_polling()
-        
-    except Exception as e:
-        logger.error(f"❌ Помилка запуску бота: {e}")
-        raise
+    if text == "🔌 Перевірити наявність електроенергії":
+        await check_light(update, context)
+    else:
+        await update.message.reply_text(
+            "Натисніть кнопку 'Перевірити наявність електроенергії' для перевірки статусу.",
+            reply_markup=MAIN_KEYBOARD
+        )
 
-if __name__ == "__main__":
+def main() -> None:
+    """Запуск бота"""
+    # Створюємо додаток
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    # Додаємо обробники команд
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    # Запускаємо бота
+    print("🤖 Бот запущено...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == '__main__':
     main()
