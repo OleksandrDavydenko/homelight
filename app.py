@@ -5,6 +5,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Call
 from light_checker import LightChecker  # Переконайтесь, що ви імпортуєте цей клас
 from config import TELEGRAM_TOKEN
 from db import get_user_subscription, update_subscription, add_user  # Потрібні функції для роботи з БД
+import broadcaster  # Ensure broadcaster is imported to enable notifications
 
 # Налаштування логування
 logging.basicConfig(
@@ -211,8 +212,13 @@ async def chat_member_handler(update: Update, context: CallbackContext) -> None:
     if update.chat_member.new_chat_member.status == "member":
         await send_welcome_message(update, context)
 
-def main() -> None:
-    """Запуск бота"""
+# Start the broadcaster's monitor loop in the background
+async def start_broadcaster():
+    asyncio.create_task(broadcaster.monitor_loop())
+
+# Call start_broadcaster during app initialization
+async def main():
+    await start_broadcaster()
     # Створюємо додаток
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(set_bot_menu).build()
 
@@ -234,5 +240,5 @@ def main() -> None:
     print("🤖 Бот запущено...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    asyncio.run(main())
