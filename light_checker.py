@@ -1,7 +1,7 @@
 import tinytuya
 import time
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from config import ACCESS_ID, ACCESS_SECRET, DEVICE_ID, TUYA_REGION
 
 class LightChecker:
@@ -87,7 +87,8 @@ class LightChecker:
                             "offline_since": update_time,
                             "offline_minutes": offline_minutes,
                             "device_name": device_name,
-                            "ip_address": our_device.get("ip")
+                            "ip_address": our_device.get("ip"),
+                            "last_update_time": update_time
                         }
                     else:
                         # Якщо пристрій онлайн, перевіряємо реальні показники
@@ -103,21 +104,23 @@ class LightChecker:
                         
                         if status_data and status_data.get("success"):
                             print(f"✅ [Tuya API] Успішно отримано детальний статус")
-                            return self.analyze_current_status(status_data, our_device)
+                            return self.analyze_current_status(status_data, our_device, current_time)
                         else:
                             print(f"❌ [Tuya API] Не вдалося отримати поточний статус")
                             return {
                                 "has_light": None, 
                                 "online": True, 
                                 "reason": "status_unavailable",
-                                "device_name": device_name
+                                "device_name": device_name,
+                                "last_update_time": update_time
                             }
                 else:
                     print(f"❌ [Tuya API] Пристрій {self.device_id} не знайдено в списку")
                     return {
                         "has_light": None, 
                         "online": None, 
-                        "reason": "device_not_found"
+                        "reason": "device_not_found",
+                        "last_update_time": None
                     }
             else:
                 # Детально логуємо помилку
@@ -155,7 +158,8 @@ class LightChecker:
                     "has_light": None, 
                     "online": None, 
                     "reason": "api_error",
-                    "error_details": devices_info
+                    "error_details": devices_info,
+                    "last_update_time": None
                 }
                 
         except Exception as e:
@@ -166,10 +170,11 @@ class LightChecker:
             return {
                 "has_light": None, 
                 "online": None, 
-                "reason": f"connection_error: {str(e)}"
+                "reason": f"connection_error: {str(e)}",
+                "last_update_time": None
             }
     
-    def analyze_current_status(self, status_data, device_info):
+    def analyze_current_status(self, status_data, device_info, current_time):
         """Аналіз поточного статусу пристрою"""
         print(f"📊 [Tuya API] Аналіз поточного статусу...")
         
@@ -238,8 +243,77 @@ class LightChecker:
             "switch_state": switch_state,
             "device_name": device_info.get("name"),
             "ip_address": device_info.get("ip"),
-            "timestamp": int(time.time())
+            "timestamp": current_time,
+            "last_update_time": device_info.get("update_time", 0)
         }
+    
+    def format_time_ago(self, timestamp):
+        """Форматує час у зрозумілий формат"""
+        if not timestamp or timestamp == 0:
+            return "немає даних"
+        
+        current_time = int(time.time())
+        diff_seconds = current_time - timestamp
+        
+        if diff_seconds < 60:
+            return "щойно"
+        elif diff_seconds < 3600:
+            minutes = diff_seconds // 60
+            return f"{minutes} хв тому"
+        elif diff_seconds < 86400:
+            hours = diff_seconds // 3600
+            minutes = (diff_seconds % 3600) // 60
+            return f"{hours} год {minutes} хв тому"
+        else:
+            days = diff_seconds // 86400
+            hours = (diff_seconds % 86400) // 3600
+            return f"{days} дн {hours} год тому"
+    
+    def format_duration(self, minutes):
+        """Форматує тривалість у зрозумілий формат"""
+        if minutes < 60:
+            return f"{minutes} хв"
+        elif minutes < 1440:
+            hours = minutes // 60
+            mins = minutes % 60
+            return f"{hours} год {mins} хв"
+        else:
+            days = minutes // 1440
+            hours = (minutes % 1440) // 60
+            return f"{days} дн {hours} год"
+    
+    def get_last_update_time(self, timestamp):
+        """Отримує час останнього оновлення"""
+        if not timestamp or timestamp == 0:
+            return "Час оновлення: немає даних"
+        
+        update_time = datetime.fromtimestamp(timestamp)
+        now = datetime.now()
+        time_diff = now - update_time
+        
+        # Форматуємо дату
+        if update_time.date() == now.date():
+            time_str = update_time.strftime("сьогодні о %H:%M")
+        elif update_time.date() == (now - timedelta(days=1)).date():
+            time_str = update_time.strftime("вчора о %H:%M")
+        else:
+            time_str = update_time.strftime("%d.%m о %H:%M")
+        
+        # Додаємо скільки часу тому
+        if time_diff.total_seconds() < 60:
+            ago = "щойно"
+        elif time_diff.total_seconds() < 3600:
+            minutes = int(time_diff.total_seconds() // 60)
+            ago = f"{minutes} хв тому"
+        elif time_diff.total_seconds() < 86400:
+            hours = int(time_diff.total_seconds() // 3600)
+            minutes = int((time_diff.total_seconds() % 3600) // 60)
+            ago = f"{hours} год {minutes} хв тому"
+        else:
+            days = int(time_diff.total_seconds() // 86400)
+            ago = f"{days} дн тому"
+        
+        return f"🕒 Оновлено: {time_str} ({ago})"
     
     def check_light_status(self):
         """Основна функція для перевірки статусу світла"""
@@ -252,49 +326,48 @@ class LightChecker:
         print(f"\n📋 [BOT] Результат перевірки:")
         print(f"📋 [BOT] Статус: {status}")
         
+        # Отримуємо інформацію про час
+        last_update_time = status.get("last_update_time", 0)
+        time_info = self.get_last_update_time(last_update_time)
+        
         # Формуємо зрозуміле повідомлення для користувача
         if status.get("online") is False:
-            device_name = status.get("device_name", "Пристрій")
             offline_minutes = status.get("offline_minutes", 0)
-            
-            if offline_minutes > 60:
-                hours = offline_minutes // 60
-                minutes = offline_minutes % 60
-                time_str = f"{hours} год {minutes} хв"
-            else:
-                time_str = f"{offline_minutes} хв"
+            offline_duration = self.format_duration(offline_minutes)
             
             result = (
-                f"🔴 ПРИСТРІЙ OFFLINE\n\n"
-                f"📱 Пристрій: {device_name}\n"
-                f"⏱️ Офлайн вже: {time_str}\n\n"
-                f"💡 Пристрій не підключений до інтернету"
+                f"🔴 СТАН: НЕМАЄ ЗВ'ЯЗКУ\n\n"
+                f"⏱️ Пристрій відключений: {offline_duration}\n"
+                f"{time_info}\n\n"
+                f"💡 Розетка не підключена до інтернету"
             )
             
         elif status.get("has_light") is True:
-            device_name = status.get("device_name", "Пристрій")
-            voltage = status.get("voltage", 0)
-            power = status.get("power", 0)
-            
-            result = f"✅ СВІТЛО Є!\n\n📱 Пристрій: {device_name}\n🔌 Напруга: {voltage:.1f} В"
-            
-            if power:
-                result += f"\n💡 Потужність: {power:.1f} Вт"
-            
-        elif status.get("has_light") is False:
-            device_name = status.get("device_name", "Пристрій")
             voltage = status.get("voltage", 0)
             
             result = (
-                f"❌ СВІТЛА НЕМАЄ!\n\n"
-                f"📱 Пристрій: {device_name}\n"
-                f"🔌 Напруга: {voltage:.1f} В\n\n"
-                f"💡 Напруги немає або вона занадто низька"
+                f"✅ СТАН: СВІТЛО Є\n\n"
+                f"🔌 Напруга в мережі: {voltage:.1f} В\n"
+                f"{time_info}\n\n"
+                f"💡 Електропостачання працює стабільно"
+            )
+            
+        elif status.get("has_light") is False:
+            voltage = status.get("voltage", 0)
+            
+            result = (
+                f"❌ СТАН: СВІТЛА НЕМАЄ\n\n"
+                f"🔌 Напруга в мережі: {voltage:.1f} В\n"
+                f"{time_info}\n\n"
+                f"💡 Відсутнє електропостачання"
             )
             
         elif status.get("reason") == "status_unavailable":
-            device_name = status.get("device_name", "Пристрій")
-            result = f"⚠️ Пристрій онлайн\n📱 {device_name}\nℹ️ Дані про напругу недоступні"
+            result = (
+                f"⚠️ СТАН: ДАНІ НЕДОСТУПНІ\n\n"
+                f"{time_info}\n\n"
+                f"💡 Пристрій онлайн, але дані про напругу відсутні"
+            )
             
         elif status.get("reason") == "api_error":
             error_details = status.get("error_details", {})
@@ -311,23 +384,28 @@ class LightChecker:
                 error_msg = str(error_details)
             
             # Обрізаємо довгий текст
-            if len(error_msg) > 200:
-                error_msg = error_msg[:200] + "..."
+            if len(error_msg) > 100:
+                error_msg = error_msg[:100] + "..."
             
             result = (
-                f"❌ ПОМИЛКА TUYA API\n\n"
-                f"Деталі: {error_msg}\n\n"
-                f"💡 Перевірте:\n"
-                f"• Чи додано IP Heroku до Tuya Whitelist\n"
-                f"• Чи правильні API ключі\n"
-                f"• Чи активний Tuya Cloud проект"
+                f"❌ ПОМИЛКА ПІДКЛЮЧЕННЯ\n\n"
+                f"ℹ️ {error_msg}\n\n"
+                f"💡 Перевірте з'єднання з сервісом"
             )
             
         else:
             reason = status.get("reason", "невідома причина")
-            result = f"❌ Помилка: {reason}"
+            result = (
+                f"❌ ПОМИЛКА\n\n"
+                f"ℹ️ {reason}\n\n"
+                f"💡 Спробуйте пізніше"
+            )
         
-        print(f"\n📤 [BOT] Відправляємо користувачу: {result}")
+        # Додаємо заголовок з поточним часом
+        current_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        final_result = f"📊 ПЕРЕВІРКА: {current_time}\n\n{result}"
+        
+        print(f"\n📤 [BOT] Відправляємо користувачу: {final_result}")
         print(f"="*60 + "\n")
         
-        return result
+        return final_result
