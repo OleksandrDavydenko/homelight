@@ -14,9 +14,11 @@ logger = logging.getLogger(__name__)
 # Ініціалізація LightChecker
 light_checker = LightChecker()
 
+# Обробка команди /start або коли користувач тільки приєднується до бота
 async def send_welcome_message(update: Update, context: CallbackContext) -> None:
     """Відправка повідомлення з кнопкою 'Підписатись' при вході в чат"""
     user = update.effective_user
+
     # Кнопка "Підписатись" — KeyboardButton для виведення внизу
     keyboard = [
         [KeyboardButton("Підписатись")]  # Це кнопка в рядку вводу
