@@ -5,6 +5,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Call
 from light_checker import LightChecker  # Переконайтесь, що ви імпортуєте цей клас
 from config import TELEGRAM_TOKEN
 from db import get_user_subscription, update_subscription, add_user  # Потрібні функції для роботи з БД
+import broadcaster
 
 # Налаштування логування
 logging.basicConfig(
@@ -46,6 +47,13 @@ async def set_bot_menu(app):
     try:
         await app.bot.set_my_commands(commands)
         logger.info("Bot menu commands set successfully")
+        # Запускаємо broadcaster як фонове завдання в тому самому event loop
+        try:
+            logger.info("Starting broadcaster.monitor_loop as background task")
+            # Використовуємо create_task, щоб не чекати завершення монітора
+            asyncio.create_task(broadcaster.monitor_loop())
+        except Exception:
+            logger.exception("Failed to start broadcaster.monitor_loop")
     except Exception as e:
         logger.exception("Failed to set bot menu commands: %s", e)
 

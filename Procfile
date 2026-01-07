@@ -1,2 +1,1 @@
-bot: python app.py
-worker: python broadcaster.py
+worker: python app.py
