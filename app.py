@@ -5,9 +5,8 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     CallbackContext,
-    ChatMemberHandler,
+    ChatMemberHandler,  # Імпортуємо ChatMemberHandler
 )
-
 from light_checker import LightChecker
 from config import TELEGRAM_TOKEN
 
@@ -90,7 +89,7 @@ def main() -> None:
     application.add_handler(CommandHandler("check", check_command))
 
     # Додаємо обробник зміни статусу члена чату (коли користувач приєднується)
-    application.add_handler(ChatMemberHandler(chat_member_handler, chat_member_updated=True))
+    application.add_handler(ChatMemberHandler(chat_member_handler))  # Правильний спосіб
 
     # Додаємо обробник кнопок
     application.add_handler(CallbackQueryHandler(button_callback))
