@@ -219,6 +219,7 @@ def main() -> None:
     """Запуск бота"""
     # Створюємо додаток
     application = Application.builder().token(TELEGRAM_TOKEN).build()
+    set_bot_menu_sync(application)
 
     # Додаємо обробники команд
     application.add_handler(CommandHandler("start", send_welcome_message))
