@@ -1,7 +1,14 @@
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, CallbackContext, ChatMemberHandler
-from light_checker import LightChecker
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    CallbackContext,
+    ChatMemberHandler,
+)
+from light_checker import LightChecker  # Переконайтесь, що ви імпортуєте цей клас
+from config import TELEGRAM_TOKEN
 
 # Налаштування логування
 logging.basicConfig(
@@ -10,33 +17,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-light_checker = LightChecker()
+light_checker = LightChecker()  # Ініціалізація LightChecker
 
 async def send_welcome_message(update: Update, context: CallbackContext) -> None:
-    """Відправка повідомлення з кнопкою 'Підписатись' при вході в чат"""
+    """Відправка повідомлення з кнопкою 'Перевірити наявність електроенергії' при вході в чат"""
     user = update.effective_user
-    # Кнопка "Підписатись" — KeyboardButton для виведення внизу
     keyboard = [
-        [KeyboardButton("Підписатись")]  # Це кнопка в рядку вводу
-    ]
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
-
-    # Кнопка "Перевірити наявність електроенергії" — InlineButton для кнопки в повідомленні
-    inline_keyboard = [
         [InlineKeyboardButton("🔌 Перевірити наявність електроенергії", callback_data='check_light')]
     ]
-    inline_reply_markup = InlineKeyboardMarkup(inline_keyboard)
+    reply_markup = InlineKeyboardMarkup(keyboard)
 
     welcome_message = (
         f"👋 Вітаю, {user.first_name}!\n\n"
         "Я бот для перевірки наявності електроенергії.\n"
-        "Натисніть кнопку 'Підписатись' або 'Перевірити наявність електроенергії'."
+        "Натисніть кнопку нижче, щоб перевірити статус."
     )
 
-    # Відправка привітального повідомлення з кнопкою "Підписатись" в полі вводу
     await update.message.reply_text(welcome_message, reply_markup=reply_markup)
-    # Додаємо кнопку "Перевірити наявність електроенергії" в повідомленні
-    await update.message.reply_text("Натисніть для перевірки", reply_markup=inline_reply_markup)
 
 async def button_callback(update: Update, context: CallbackContext) -> None:
     """Обробник натискання на кнопки"""
@@ -48,7 +45,7 @@ async def button_callback(update: Update, context: CallbackContext) -> None:
 
         try:
             # Виконуємо перевірку
-            result = "Стан: Світло є"  # Для тестування можна використовувати статичне повідомлення
+            result = light_checker.check_light_status()
 
             # Формуємо нову клавіатуру
             keyboard = [
@@ -73,19 +70,50 @@ async def button_callback(update: Update, context: CallbackContext) -> None:
                 reply_markup=reply_markup
             )
 
+async def help_command(update: Update, context: CallbackContext) -> None:
+    """Обробник команди /help"""
+    keyboard = [
+        [InlineKeyboardButton("🔌 Перевірити наявність електроенергії", callback_data='check_light')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    help_text = (
+        "Доступні команди:\n"
+        "/start - Почати роботу з ботом\n"
+        "/check - Перевірити наявність світла\n"
+        "/help - Показати це повідомлення\n\n"
+        "Просто натисніть кнопку нижче для перевірки."
+    )
+
+    await update.message.reply_text(help_text, reply_markup=reply_markup)
+
+async def check_command(update: Update, context: CallbackContext) -> None:
+    """Обробник команди /check"""
+    keyboard = [
+        [InlineKeyboardButton("🔌 Перевірити наявність електроенергії", callback_data='check_light')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        "Натисніть кнопку для перевірки наявності електроенергії:",
+        reply_markup=reply_markup
+    )
+
 async def chat_member_handler(update: Update, context: CallbackContext) -> None:
     """Обробник подій зміни статусу користувача в чаті"""
-    # Якщо користувач приєднався до чату, відправляємо йому кнопку "Підписатись"
+    # Якщо користувач приєднався до чату, відправляємо йому кнопку "Перевірити наявність електроенергії"
     if update.chat_member.new_chat_member.status == "member":
         await send_welcome_message(update, context)
 
 def main() -> None:
     """Запуск бота"""
     # Створюємо додаток
-    application = Application.builder().token('YOUR_BOT_TOKEN').build()
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     # Додаємо обробники команд
     application.add_handler(CommandHandler("start", send_welcome_message))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("check", check_command))
 
     # Додаємо обробник зміни статусу члена чату (коли користувач приєднується)
     application.add_handler(ChatMemberHandler(chat_member_handler))  # Правильний спосіб
