@@ -30,21 +30,24 @@ async def notify_subscribers(bot: Bot, message: str):
 async def monitor_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
     checker = LightChecker()
-    last_status = None
+    last_key = None
 
     while True:
         try:
-            # Якщо check_light_status є блокуючою, виконуємо в окремому потоці
-            status = await asyncio.to_thread(checker.check_light_status)
+            # Отримуємо сирий статус без форматування (щоб порівнювати стабільні поля)
+            raw = await asyncio.to_thread(checker.get_real_device_status)
+            # Ключ, за яким будемо визначати зміну — has_light, online, reason
+            key = (raw.get("has_light"), raw.get("online"), raw.get("reason"))
 
-            if last_status is None:
-                last_status = status
-                logger.info("Initial status: %s", status)
-            elif status != last_status:
-                logger.info("Status changed: %s -> %s", last_status, status)
-                message = f"🔔 Зміна статусу електроенергії:\n\n{status}"
+            if last_key is None:
+                last_key = key
+                logger.info("Initial status key: %s", key)
+            elif key != last_key:
+                logger.info("Status key changed: %s -> %s", last_key, key)
+                # Форматуємо повне повідомлення для відправки безпосередньо перед розсилкою
+                message = await asyncio.to_thread(checker.check_light_status)
                 await notify_subscribers(bot, message)
-                last_status = status
+                last_key = key
             else:
                 logger.debug("No change in status")
         except Exception as e:
