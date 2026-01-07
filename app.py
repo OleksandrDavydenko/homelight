@@ -24,12 +24,14 @@ def get_subscription_keyboard(telegram_id):
     if user_subscribed:  # Якщо користувач підписаний
         return [
             [KeyboardButton("🔕 Відписатись")],
-            [KeyboardButton("🔌 Перевірити наявність електроенергії")]
+            [KeyboardButton("🔌 Перевірити наявність електроенергії")],
+            [KeyboardButton("ℹ️ Довідка")]
         ]
     else:  # Якщо користувач не підписаний
         return [
             [KeyboardButton("🔔 Підписатись")],
-            [KeyboardButton("🔌 Перевірити наявність електроенергії")]
+            [KeyboardButton("🔌 Перевірити наявність електроенергії")],
+            [KeyboardButton("ℹ️ Довідка")]
         ]
 
 # Обробка команди /start або коли користувач тільки приєднується до бота
@@ -148,6 +150,15 @@ async def handle_text_message(update: Update, context: CallbackContext) -> None:
             except Exception as e:
                 logger.error(f"Помилка при перевірці світла: {e}")
                 await update.message.reply_text("❌ Сталася помилка при перевірці. Спробуйте пізніше.")
+        elif text == 'ℹ️ Довідка':
+            info_text = (
+                "Я бот для перевірки наявності електроенергії.\n\n"
+                "- Можу перевірити стан через розетку Tuya і показати напругу/потужність.\n"
+                "- Можна натиснути '🔌 Перевірити наявність електроенергії' для миттєвої перевірки.\n"
+                "- Натисніть '🔔 Підписатись' щоб отримувати повідомлення при зміні статусу, або '🔕 Відписатись' щоб вимкнути сповіщення.\n\n"
+                "Якщо потрібна допомога — напишіть /help"
+            )
+            await update.message.reply_text(info_text)
     except Exception as e:
         logger.exception(f"Помилка при обробці повідомлення: {e}")
         await update.message.reply_text('Сталася помилка. Спробуйте пізніше.')
