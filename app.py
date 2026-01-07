@@ -5,7 +5,7 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     CallbackContext,
-    ChatMemberHandler,  # Імпортуємо ChatMemberHandler
+    ChatMemberHandler,
 )
 from light_checker import LightChecker
 from config import TELEGRAM_TOKEN
@@ -20,17 +20,17 @@ logger = logging.getLogger(__name__)
 light_checker = LightChecker()
 
 async def send_welcome_message(update: Update, context: CallbackContext) -> None:
-    """Відправка повідомлення з кнопкою 'Підписатись' при вході в чат"""
+    """Відправка повідомлення з кнопкою 'Перевірити наявність електроенергії' при вході в чат"""
     user = update.effective_user
     keyboard = [
-        [InlineKeyboardButton("Підписатись", callback_data='subscribe')]
+        [InlineKeyboardButton("🔌 Перевірити наявність електроенергії", callback_data='check_light')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     welcome_message = (
         f"👋 Вітаю, {user.first_name}!\n\n"
         "Я бот для перевірки наявності електроенергії.\n"
-        "Натисніть кнопку нижче, щоб підписатися."
+        "Натисніть кнопку нижче, щоб перевірити статус."
     )
 
     await update.message.reply_text(welcome_message, reply_markup=reply_markup)
@@ -40,8 +40,35 @@ async def button_callback(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
     await query.answer()
 
-    if query.data == 'subscribe':
-        await query.edit_message_text(text="🔄 Ви підписалися!")
+    if query.data == 'check_light':
+        await query.edit_message_text(text="🔄 Перевіряю наявність електроенергії...")
+
+        try:
+            # Виконуємо перевірку
+            result = light_checker.check_light_status()
+
+            # Формуємо нову клавіатуру
+            keyboard = [
+                [InlineKeyboardButton("🔄 Перевірити ще раз", callback_data='check_light')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            # Оновлюємо повідомлення з результатом
+            await query.edit_message_text(
+                text=f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ:\n\n{result}",
+                reply_markup=reply_markup
+            )
+
+        except Exception as e:
+            logger.error(f"Помилка при перевірці світла: {e}")
+            keyboard = [
+                [InlineKeyboardButton("🔄 Спробувати ще раз", callback_data='check_light')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                text="❌ Сталася помилка при перевірці. Спробуйте пізніше.",
+                reply_markup=reply_markup
+            )
 
 async def help_command(update: Update, context: CallbackContext) -> None:
     """Обробник команди /help"""
@@ -74,7 +101,7 @@ async def check_command(update: Update, context: CallbackContext) -> None:
 
 async def chat_member_handler(update: Update, context: CallbackContext) -> None:
     """Обробник подій зміни статусу користувача в чаті"""
-    # Якщо користувач приєднався до чату, відправляємо йому кнопку "Підписатись"
+    # Якщо користувач приєднався до чату, відправляємо йому кнопку "Перевірити наявність електроенергії"
     if update.chat_member.new_chat_member.status == "member":
         await send_welcome_message(update, context)
 
