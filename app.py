@@ -127,9 +127,17 @@ async def handle_text_message(update: Update, context: CallbackContext) -> None:
         if text == 'Підписатись':
             await asyncio.to_thread(add_user, telegram_id, first_name, True)
             await update.message.reply_text('✅ Ви підписалися на отримання оновлень.')
+            # Оновлюємо клавіатуру з новою кнопкою
+            keyboard = get_subscription_keyboard(telegram_id)
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+            await update.message.reply_text('Натисніть для подальших дій:', reply_markup=reply_markup)
         elif text == 'Відписатись':
             await asyncio.to_thread(update_subscription, telegram_id, False)
             await update.message.reply_text('❌ Ви відписалися від отримання оновлень.')
+            # Оновлюємо клавіатуру з новою кнопкою
+            keyboard = get_subscription_keyboard(telegram_id)
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+            await update.message.reply_text('Натисніть для подальших дій:', reply_markup=reply_markup)
     except Exception as e:
         logger.exception(f"Помилка при обробці підписки: {e}")
         await update.message.reply_text('Сталася помилка при зміні підписки. Спробуйте пізніше.')
