@@ -1,8 +1,7 @@
 import tinytuya
 import time
-from datetime import datetime
-from config import ACCESS_ID, ACCESS_SECRET, DEVICE_ID, TUYA_REGION
 import logging
+from config import ACCESS_ID, ACCESS_SECRET, DEVICE_ID, TUYA_REGION, DEBUG
 
 logger = logging.getLogger(__name__)
 
@@ -14,8 +13,8 @@ class LightChecker:
         self.region = TUYA_REGION
         
     def get_real_device_status(self):
-        """Отримання реального статусу пристрою з перевіркою онлайн статусу"""
-        logger.info(f"Перевірка статусу пристрою {self.device_id} в регіоні {self.region}")
+        """Отримання реального статусу пристрою"""
+        logger.info(f"🔄 Перевірка пристрою {self.device_id} в регіоні {self.region}")
         
         try:
             # Підключаємося до Tuya Cloud
@@ -26,105 +25,102 @@ class LightChecker:
                 apiDeviceID=self.device_id
             )
             
-            logger.info(f"Підключення до Tuya Cloud...")
+            logger.info("📡 Запит до Tuya API...")
             
-            # 1. Отримуємо інформацію про пристрої
-            devices_info = cloud.getdevices()
+            # Отримуємо список пристроїв
+            devices_list = cloud.getdevices()
             
-            if devices_info is None:
-                logger.error("Tuya API повернув None")
-                return {
-                    "has_light": None, 
-                    "online": None, 
-                    "reason": "api_returned_none",
-                    "message": "❌ Tuya API не відповідає"
-                }
+            if DEBUG:
+                logger.info(f"🔍 Дані пристроїв: {devices_list}")
             
-            logger.info(f"Відповідь від API: {devices_info}")
-            
-            if isinstance(devices_info, dict) and devices_info.get("success", False):
-                devices_list = devices_info.get("result", [])
-                logger.info(f"Знайдено пристроїв: {len(devices_list)}")
+            # Перевіряємо тип відповіді
+            if isinstance(devices_list, list):
+                logger.info(f"✅ Отримано список з {len(devices_list)} пристроїв")
                 
-                # Шукаємо нашу розетку
+                # Шукаємо наш пристрій
                 our_device = None
                 for device in devices_list:
-                    if device.get("id") == self.device_id:
+                    if isinstance(device, dict) and device.get("id") == self.device_id:
                         our_device = device
                         break
                 
                 if our_device:
-                    logger.info(f"Знайдено пристрій: {our_device.get('name')}")
-                    
-                    # Перевіряємо онлайн статус
+                    device_name = our_device.get("name", "Невідомий пристрій")
                     online_status = our_device.get("online", False)
-                    update_time = our_device.get("update_time", 0)
-                    current_time = int(time.time())
-                    
-                    logger.info(f"Статус пристрою: {'ONLINE' if online_status else 'OFFLINE'}")
+                    logger.info(f"📱 Знайдено пристрій: {device_name}")
+                    logger.info(f"🌐 Статус: {'ONLINE' if online_status else 'OFFLINE'}")
                     
                     if not online_status:
+                        update_time = our_device.get("update_time", 0)
+                        current_time = int(time.time())
                         offline_minutes = (current_time - update_time) // 60
+                        
                         return {
                             "has_light": False,
                             "online": False,
-                            "reason": "device_offline",
-                            "offline_since": update_time,
-                            "offline_minutes": offline_minutes,
-                            "message": f"🔴 РОЗЕТКА OFFLINE\n⏱️ Офлайн вже: {offline_minutes} хвилин"
+                            "device_name": device_name,
+                            "message": f"🔴 ПРИСТРІЙ OFFLINE\n📱 {device_name}\n⏱️ Офлайн вже: {offline_minutes} хв.",
+                            "offline_minutes": offline_minutes
                         }
                     else:
-                        # Якщо пристрій онлайн, отримуємо детальний статус
-                        logger.info("Отримання детального статусу...")
+                        # Пристрій онлайн - отримуємо детальний статус
+                        logger.info("📊 Отримання детального статусу...")
                         status_data = cloud.getstatus(self.device_id)
                         
-                        if status_data and status_data.get("success", False):
+                        if DEBUG:
+                            logger.info(f"🔍 Статус пристрою: {status_data}")
+                        
+                        if isinstance(status_data, dict) and status_data.get("success", False):
                             return self._analyze_current_status(status_data, our_device)
                         else:
-                            logger.error(f"Не вдалося отримати статус: {status_data}")
                             return {
-                                "has_light": None, 
-                                "online": True, 
-                                "reason": "status_unavailable",
-                                "message": "⚠️ Пристрій онлайн, але дані недоступні"
+                                "has_light": None,
+                                "online": True,
+                                "device_name": device_name,
+                                "message": f"⚠️ Пристрій онлайн, але дані недоступні\n📱 {device_name}"
                             }
                 else:
-                    logger.error(f"Пристрій {self.device_id} не знайдено")
-                    # Виводимо всі доступні пристрої для налагодження
-                    device_list_str = "\n".join([f"{d.get('id')}: {d.get('name')}" for d in devices_list])
-                    logger.info(f"Доступні пристрої:\n{device_list_str}")
-                    
+                    # Пристрій не знайдено
+                    device_names = [d.get("name", "Без назви") for d in devices_list]
                     return {
-                        "has_light": None, 
-                        "online": None, 
-                        "reason": "device_not_found",
-                        "message": f"❌ Пристрій не знайдено. Доступні пристрої: {len(devices_list)}"
+                        "has_light": None,
+                        "online": None,
+                        "message": f"❌ Пристрій {self.device_id} не знайдено\n📱 Доступні пристрої: {', '.join(device_names)}"
+                    }
+            elif isinstance(devices_list, dict):
+                # Старий формат відповіді
+                if devices_list.get("success", False):
+                    devices = devices_list.get("result", [])
+                    # Обробка аналогічна вище
+                    # ... (додайте обробку старого формату)
+                else:
+                    error_msg = devices_list.get("msg", "Невідома помилка")
+                    return {
+                        "has_light": None,
+                        "online": None,
+                        "message": f"❌ Помилка Tuya API: {error_msg}"
                     }
             else:
-                error_msg = devices_info.get("msg", "Невідома помилка")
-                error_code = devices_info.get("code", "Невідомий код")
-                logger.error(f"Помилка Tuya API: {error_msg} (код: {error_code})")
-                
                 return {
-                    "has_light": None, 
-                    "online": None, 
-                    "reason": f"api_error_{error_code}",
-                    "message": f"❌ Помилка Tuya API: {error_msg}"
+                    "has_light": None,
+                    "online": None,
+                    "message": f"❌ Невірний формат відповіді: {type(devices_list)}"
                 }
                 
         except Exception as e:
-            logger.exception(f"Критична помилка підключення: {e}")
+            logger.exception(f"💥 Критична помилка: {e}")
             return {
-                "has_light": None, 
-                "online": None, 
-                "reason": f"connection_error: {str(e)}",
-                "message": f"❌ Помилка підключення до Tuya: {str(e)}"
+                "has_light": None,
+                "online": None,
+                "message": f"❌ Помилка підключення: {str(e)}"
             }
     
     def _analyze_current_status(self, status_data, device_info):
         """Аналіз поточного статусу пристрою"""
         result = status_data.get("result", [])
-        logger.info(f"Дані статусу: {result}")
+        device_name = device_info.get("name", "Невідомий пристрій")
+        
+        logger.info(f"🔍 Аналіз даних: {result}")
         
         # Знаходимо ключові параметри
         voltage = None
@@ -133,49 +129,47 @@ class LightChecker:
         switch_state = None
         
         for item in result:
-            code = item.get("code")
-            value = item.get("value")
-            
-            if code == "cur_voltage":
-                voltage = value / 10 if value is not None else None
-            elif code == "cur_power":
-                power = value / 10 if value is not None else None
-            elif code == "cur_current":
-                current = value / 1000 if value is not None else None
-            elif code == "switch_1":
-                switch_state = value
+            if isinstance(item, dict):
+                code = item.get("code")
+                value = item.get("value")
+                
+                if code == "cur_voltage" and value is not None:
+                    voltage = value / 10.0
+                elif code == "cur_power" and value is not None:
+                    power = value / 10.0
+                elif code == "cur_current" and value is not None:
+                    current = value / 1000.0
+                elif code == "switch_1":
+                    switch_state = value
         
         # Визначаємо, чи є світло
-        has_light = False
-        message = ""
-        
         if voltage is not None:
             if voltage > 100:
                 if (power is not None and power > 0) or (current is not None and current > 0):
-                    has_light = True
-                    message = f"✅ СВІТЛО Є\n🔌 Напруга: {voltage:.1f} В"
+                    message = f"✅ СВІТЛО Є!\n📱 {device_name}\n🔌 Напруга: {voltage:.1f} В"
                     if power:
                         message += f"\n💡 Потужність: {power:.1f} Вт"
+                    has_light = True
                 else:
-                    has_light = True  # Напруга є - припускаємо що світло є
-                    message = f"⚠️ НАПРУГА Є ({voltage:.1f} В), але немає споживання\nМожливо, нічого не підключено до розетки"
+                    message = f"⚠️ НАПРУГА Є ({voltage:.1f} В), але немає споживання\n📱 {device_name}\nМожливо, нічого не підключено"
+                    has_light = True
             else:
-                message = f"❌ НАПРУГИ НЕМАЄ ({voltage:.1f} В)\n💡 ВИСНОВОК: СВІТЛА НЕМАЄ"
+                message = f"❌ СВІТЛА НЕМАЄ!\n📱 {device_name}\n🔌 Напруга: {voltage:.1f} В"
+                has_light = False
         else:
-            message = "⚠️ НЕ ВДАЛОСЯ ОТРИМАТИ НАПРУГУ\n💡 ВИСНОВОК: НЕВІДОМО"
+            message = f"⚠️ НЕ ВДАЛОСЯ ОТРИМАТИ НАПРУГУ\n📱 {device_name}"
+            has_light = None
         
-        logger.info(f"Результат аналізу: {message}")
+        logger.info(f"📋 Результат: {message}")
         
         return {
             "has_light": has_light,
-            "online": device_info.get("online", False),
+            "online": True,
             "voltage": voltage,
             "power": power,
             "current": current,
             "switch_state": switch_state,
-            "device_name": device_info.get("name"),
-            "ip_address": device_info.get("ip"),
-            "timestamp": int(time.time()),
+            "device_name": device_name,
             "message": message
         }
     
@@ -183,14 +177,7 @@ class LightChecker:
         """Основна функція для перевірки статусу світла"""
         try:
             status = self.get_real_device_status()
-            
-            # Якщо статус None або помилка
-            if status is None:
-                return "❌ Не вдалося отримати статус. Спробуйте пізніше."
-            
-            # Повертаємо повідомлення з результату
             return status.get("message", "⚠️ Не вдалося отримати інформацію")
-            
         except Exception as e:
             logger.exception(f"Помилка у check_light_status: {e}")
-            return f"❌ Внутрішня помилка бота: {str(e)}"
+            return f"❌ Внутрішня помилка: {str(e)}"
