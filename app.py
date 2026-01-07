@@ -5,7 +5,6 @@ from telegram.ext import (
     CommandHandler,
     CallbackQueryHandler,
     CallbackContext,
-    filters
 )
 from light_checker import LightChecker
 from config import TELEGRAM_TOKEN
