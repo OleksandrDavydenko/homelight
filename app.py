@@ -5,7 +5,6 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Call
 from light_checker import LightChecker  # Переконайтесь, що ви імпортуєте цей клас
 from config import TELEGRAM_TOKEN
 from db import get_user_subscription, update_subscription, add_user  # Потрібні функції для роботи з БД
-import broadcaster  # Ensure broadcaster is imported to enable notifications
 
 # Налаштування логування
 logging.basicConfig(
@@ -21,8 +20,9 @@ light_checker = LightChecker()
 def get_subscription_keyboard(telegram_id):
     """Отримання клавіатури з кнопкою 'Підписатись' або 'Відписатись' залежно від статусу"""
     user_subscribed = get_user_subscription(telegram_id)
-    
-    if user_subscribed:  # Якщо користувач підписаний
+
+    # Виконуємо строгу перевірку на True — це захист від рядкових значень ('false', 'True' тощо)
+    if user_subscribed is True:  # Якщо користувач підписаний
         return [
             [KeyboardButton("🔕 Відписатись")],
             [KeyboardButton("🔌 Перевірити наявність електроенергії")],
@@ -55,6 +55,14 @@ async def send_welcome_message(update: Update, context: CallbackContext) -> None
     user = update.effective_user
     telegram_id = user.id
 
+    # Спочатку додаємо/оновлюємо користувача в базі (щоб клавіатура відображала актуальний стан)
+    try:
+        logger.info("send_welcome_message: upsert user %s (first_name=%s) subscribed=False", telegram_id, user.first_name)
+        await asyncio.to_thread(add_user, telegram_id, user.first_name, False)
+        logger.info("send_welcome_message: upsert finished for %s", telegram_id)
+    except Exception:
+        logger.exception("Не вдалося додати або оновити користувача в базі")
+
     # Отримуємо клавіатуру з кнопками 'Підписатись'/'Відписатись' і 'Перевірити'
     keyboard = get_subscription_keyboard(telegram_id)
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
@@ -64,15 +72,6 @@ async def send_welcome_message(update: Update, context: CallbackContext) -> None
         "Я бот для перевірки наявності електроенергії в будинку на Полтавській 64.\n"
         "Натисніть на потрібну кнопку."
     )
-
-    # Додаємо/оновлюємо користувача в базі (неблокуюче)
-    try:
-        logger.info("send_welcome_message: upsert user %s (first_name=%s) subscribed=False", telegram_id, user.first_name)
-        await asyncio.to_thread(add_user, telegram_id, user.first_name, False)
-        logger.info("send_welcome_message: upsert finished for %s", telegram_id)
-    except Exception:
-        logger.exception("Не вдалося додати або оновити користувача в базі")
-
     # Відправка привітального повідомлення з кнопками
     await update.message.reply_text(welcome_message, reply_markup=reply_markup)
 
@@ -116,11 +115,12 @@ async def subscription_button_callback(update: Update, context: CallbackContext)
             )
         
     elif query.data == 'subscribe' or query.data == 'unsubscribe':
-        if user_subscribed:  # Якщо підписаний, відписуємо
-            update_subscription(telegram_id, False)
+        # Виконуємо строгий чек — тільки реальний True означає підписку
+        if user_subscribed is True:  # Якщо підписаний, відписуємо
+            await asyncio.to_thread(update_subscription, telegram_id, False)
             await query.edit_message_text("❌ Ви відписалися від отримання оновлень.")
         else:  # Якщо не підписаний, підписуємо
-            update_subscription(telegram_id, True)
+            await asyncio.to_thread(update_subscription, telegram_id, True)
             await query.edit_message_text("✅ Ви підписалися на отримання оновлень.")
 
         # Оновлюємо кнопку на протилежну
@@ -212,13 +212,8 @@ async def chat_member_handler(update: Update, context: CallbackContext) -> None:
     if update.chat_member.new_chat_member.status == "member":
         await send_welcome_message(update, context)
 
-# Start the broadcaster's monitor loop in the background
-async def start_broadcaster():
-    asyncio.create_task(broadcaster.monitor_loop())
-
-# Call start_broadcaster during app initialization
-async def main():
-    await start_broadcaster()
+def main() -> None:
+    """Запуск бота"""
     # Створюємо додаток
     application = Application.builder().token(TELEGRAM_TOKEN).post_init(set_bot_menu).build()
 
@@ -240,5 +235,5 @@ async def main():
     print("🤖 Бот запущено...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == '__main__':
+    main()
