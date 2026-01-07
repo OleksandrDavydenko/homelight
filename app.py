@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, CallbackContext, ChatMemberHandler, MessageHandler, filters
 from light_checker import LightChecker  # Переконайтесь, що ви імпортуєте цей клас
@@ -53,7 +54,7 @@ async def send_welcome_message(update: Update, context: CallbackContext) -> None
 
     # Додаємо/оновлюємо користувача в базі (неблокуюче)
     try:
-        await context.application.run_in_executor(None, add_user, telegram_id, user.first_name, False)
+        await asyncio.to_thread(add_user, telegram_id, user.first_name, False)
     except Exception:
         logger.exception("Не вдалося додати або оновити користувача в базі")
 
@@ -124,10 +125,10 @@ async def handle_text_message(update: Update, context: CallbackContext) -> None:
 
     try:
         if text == 'Підписатись':
-            await context.application.run_in_executor(None, add_user, telegram_id, first_name, True)
+            await asyncio.to_thread(add_user, telegram_id, first_name, True)
             await update.message.reply_text('✅ Ви підписалися на отримання оновлень.')
         elif text == 'Відписатись':
-            await context.application.run_in_executor(None, update_subscription, telegram_id, False)
+            await asyncio.to_thread(update_subscription, telegram_id, False)
             await update.message.reply_text('❌ Ви відписалися від отримання оновлень.')
     except Exception as e:
         logger.exception(f"Помилка при обробці підписки: {e}")
