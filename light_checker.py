@@ -1,8 +1,9 @@
 import tinytuya
 import time
 import json
-from datetime import datetime, timedelta
-from config import ACCESS_ID, ACCESS_SECRET, DEVICE_ID, TUYA_REGION
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
+from config import ACCESS_ID, ACCESS_SECRET, DEVICE_ID, TUYA_REGION, TIMEZONE
 
 class LightChecker:
     def __init__(self):
@@ -71,7 +72,13 @@ class LightChecker:
                     print(f"🌐 [Tuya API] Статус підключення: {'🟢 ONLINE' if online_status else '🔴 OFFLINE'}")
                     
                     if update_time > 0:
-                        last_seen = datetime.fromtimestamp(update_time).strftime("%Y-%m-%d %H:%M:%S")
+                        # Показуємо час у часовій зоні з конфігурації
+                        try:
+                            tz = ZoneInfo(TIMEZONE)
+                            last_seen_dt = datetime.fromtimestamp(update_time, tz=timezone.utc).astimezone(tz)
+                            last_seen = last_seen_dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+                        except Exception:
+                            last_seen = datetime.fromtimestamp(update_time).strftime("%Y-%m-%d %H:%M:%S")
                         seconds_ago = current_time - update_time
                         print(f"🕒 [Tuya API] Час останнього оновлення: {last_seen}")
                         print(f"⏱️ [Tuya API] Секунд тому: {seconds_ago}")
@@ -286,33 +293,41 @@ class LightChecker:
         """Отримує час останнього оновлення"""
         if not timestamp or timestamp == 0:
             return "Час оновлення: немає даних"
-        
-        update_time = datetime.fromtimestamp(timestamp)
-        now = datetime.now()
-        time_diff = now - update_time
-        
+
+        # Конвертуємо timestamp у datetime з урахуванням обраної часової зони
+        try:
+            tz = ZoneInfo(TIMEZONE)
+            dt = datetime.fromtimestamp(timestamp, tz=timezone.utc).astimezone(tz)
+            now_dt = datetime.now(tz)
+        except Exception:
+            dt = datetime.fromtimestamp(timestamp)
+            now_dt = datetime.now()
+
+        diff = now_dt - dt
+        diff_seconds = int(diff.total_seconds())
+
         # Форматуємо дату
-        if update_time.date() == now.date():
-            time_str = update_time.strftime("сьогодні о %H:%M")
-        elif update_time.date() == (now - timedelta(days=1)).date():
-            time_str = update_time.strftime("вчора о %H:%M")
+        if dt.date() == now_dt.date():
+            time_str = dt.strftime("сьогодні о %H:%M")
+        elif dt.date() == (now_dt - timedelta(days=1)).date():
+            time_str = dt.strftime("вчора о %H:%M")
         else:
-            time_str = update_time.strftime("%d.%m о %H:%M")
-        
+            time_str = dt.strftime("%d.%m о %H:%M")
+
         # Додаємо скільки часу тому
-        if time_diff.total_seconds() < 60:
+        if diff_seconds < 60:
             ago = "щойно"
-        elif time_diff.total_seconds() < 3600:
-            minutes = int(time_diff.total_seconds() // 60)
+        elif diff_seconds < 3600:
+            minutes = diff_seconds // 60
             ago = f"{minutes} хв тому"
-        elif time_diff.total_seconds() < 86400:
-            hours = int(time_diff.total_seconds() // 3600)
-            minutes = int((time_diff.total_seconds() % 3600) // 60)
+        elif diff_seconds < 86400:
+            hours = diff_seconds // 3600
+            minutes = (diff_seconds % 3600) // 60
             ago = f"{hours} год {minutes} хв тому"
         else:
-            days = int(time_diff.total_seconds() // 86400)
+            days = diff_seconds // 86400
             ago = f"{days} дн тому"
-        
+
         return f"🕒 Оновлено: {time_str} ({ago})"
     
     def check_light_status(self):
@@ -400,8 +415,12 @@ class LightChecker:
                 f"💡 Спробуйте пізніше"
             )
         
-        # Додаємо заголовок з поточним часом
-        current_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+        # Додаємо заголовок з поточним часом у відповідній часовій зоні
+        try:
+            tz = ZoneInfo(TIMEZONE)
+            current_time = datetime.now(tz).strftime("%d.%m.%Y %H:%M:%S %Z")
+        except Exception:
+            current_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
         final_result = f"📊 ПЕРЕВІРКА: {current_time}\n\n{result}"
         
         print(f"\n📤 [BOT] Відправляємо користувачу: {final_result}")

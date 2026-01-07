@@ -9,3 +9,5 @@ DEVICE_ID = os.getenv("DEVICE_ID", "")
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 
 TUYA_REGION = os.getenv("TUYA_REGION", "eu")
+# Таймзона для відображення часу (наприклад, 'Europe/Kyiv')
+TIMEZONE = os.getenv("TIMEZONE", "Europe/Kyiv")
