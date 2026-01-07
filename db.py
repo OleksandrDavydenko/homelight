@@ -27,15 +27,15 @@ def create_table():
     conn.close()
 
 def add_user(telegram_id, first_name, subscribed=False):
-    """Додаємо користувача в таблицю"""
+    """Додаємо користувача в таблицю або оновлюємо його підписку"""
     conn = connect_db()
     cursor = conn.cursor()
 
     cursor.execute("""
         INSERT INTO usersLightBot (telegram_id, first_name, subscribed)
         VALUES (%s, %s, %s)
-        ON CONFLICT (telegram_id) DO NOTHING;
-    """, (telegram_id, first_name, subscribed))
+        ON CONFLICT (telegram_id) DO UPDATE SET subscribed = %s, first_name = %s;
+    """, (telegram_id, first_name, subscribed, subscribed, first_name))
 
     conn.commit()
     cursor.close()
