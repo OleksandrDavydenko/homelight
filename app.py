@@ -1,9 +1,9 @@
 import logging
-from telegram import Update, ReplyKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
-    MessageHandler,
+    CallbackQueryHandler,
     CallbackContext,
     filters
 )
@@ -17,18 +17,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Ініціалізація перевірки світла
 light_checker = LightChecker()
-
-# Створюємо клавіатуру з однією кнопкою
-MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    [["🔌 Перевірити наявність електроенергії"]],
-    resize_keyboard=True,
-    one_time_keyboard=False
-)
 
 async def start(update: Update, context: CallbackContext) -> None:
     """Обробник команди /start"""
+    keyboard = [
+        [InlineKeyboardButton("🔌 Перевірити наявність електроенергії", callback_data='check_light')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     user = update.effective_user
     welcome_message = (
         f"👋 Вітаю, {user.first_name}!\n\n"
@@ -36,47 +33,72 @@ async def start(update: Update, context: CallbackContext) -> None:
         "Натисніть кнопку нижче, щоб перевірити статус."
     )
     
+    await update.message.reply_text(welcome_message, reply_markup=reply_markup)
+
+async def button_callback(update: Update, context: CallbackContext) -> None:
+    """Обробник натискань на кнопки"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.data == 'check_light':
+        # Відправляємо повідомлення про обробку
+        await query.edit_message_text(text="🔄 Перевіряю наявність електроенергії...")
+        
+        try:
+            # Виконуємо перевірку
+            result = light_checker.check_light_status()
+            
+            # Формуємо нову клавіатуру
+            keyboard = [
+                [InlineKeyboardButton("🔄 Перевірити ще раз", callback_data='check_light')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            # Оновлюємо повідомлення з результатом
+            await query.edit_message_text(
+                text=f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ:\n\n{result}",
+                reply_markup=reply_markup
+            )
+            
+        except Exception as e:
+            logger.error(f"Помилка при перевірці світла: {e}")
+            keyboard = [
+                [InlineKeyboardButton("🔄 Спробувати ще раз", callback_data='check_light')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(
+                text="❌ Сталася помилка при перевірці. Спробуйте пізніше.",
+                reply_markup=reply_markup
+            )
+
+async def help_command(update: Update, context: CallbackContext) -> None:
+    """Обробник команди /help"""
+    keyboard = [
+        [InlineKeyboardButton("🔌 Перевірити наявність електроенергії", callback_data='check_light')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    help_text = (
+        "Доступні команди:\n"
+        "/start - Почати роботу з ботом\n"
+        "/check - Перевірити наявність світла\n"
+        "/help - Показати це повідомлення\n\n"
+        "Просто натисніть кнопку нижче для перевірки."
+    )
+    
+    await update.message.reply_text(help_text, reply_markup=reply_markup)
+
+async def check_command(update: Update, context: CallbackContext) -> None:
+    """Обробник команди /check"""
+    keyboard = [
+        [InlineKeyboardButton("🔌 Перевірити наявність електроенергії", callback_data='check_light')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
     await update.message.reply_text(
-        welcome_message,
-        reply_markup=MAIN_KEYBOARD
+        "Натисніть кнопку для перевірки наявності електроенергії:",
+        reply_markup=reply_markup
     )
-
-async def check_light(update: Update, context: CallbackContext) -> None:
-    """Обробник для перевірки світла"""
-    # Відправляємо повідомлення про початок перевірки
-    processing_message = await update.message.reply_text(
-        "🔄 Перевіряю наявність електроенергії...",
-        reply_markup=MAIN_KEYBOARD
-    )
-    
-    try:
-        # Виконуємо перевірку
-        result = light_checker.check_light_status()
-        
-        # Редагуємо попереднє повідомлення з результатом
-        await processing_message.edit_text(
-            f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ:\n\n{result}",
-            reply_markup=MAIN_KEYBOARD
-        )
-        
-    except Exception as e:
-        logger.error(f"Помилка при перевірці світла: {e}")
-        await processing_message.edit_text(
-            "❌ Сталася помилка при перевірці. Спробуйте пізніше.",
-            reply_markup=MAIN_KEYBOARD
-        )
-
-async def handle_message(update: Update, context: CallbackContext) -> None:
-    """Обробник текстових повідомлень"""
-    text = update.message.text
-    
-    if text == "🔌 Перевірити наявність електроенергії":
-        await check_light(update, context)
-    else:
-        await update.message.reply_text(
-            "Натисніть кнопку 'Перевірити наявність електроенергії' для перевірки статусу.",
-            reply_markup=MAIN_KEYBOARD
-        )
 
 def main() -> None:
     """Запуск бота"""
@@ -85,7 +107,11 @@ def main() -> None:
     
     # Додаємо обробники команд
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("check", check_command))
+    
+    # Додаємо обробник кнопок
+    application.add_handler(CallbackQueryHandler(button_callback))
     
     # Запускаємо бота
     print("🤖 Бот запущено...")
