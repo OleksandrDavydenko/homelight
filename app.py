@@ -1,6 +1,6 @@
 import logging
 import asyncio
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, BotCommand
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, BotCommand, BotCommandScopeChat
 from telegram.ext import Application, CommandHandler, CallbackContext, ChatMemberHandler, MessageHandler, filters
 from light_checker import LightChecker  # Переконайтесь, що ви імпортуєте цей клас
 from config import TELEGRAM_TOKEN
@@ -39,8 +39,9 @@ def get_subscription_keyboard(telegram_id):
 
 async def set_bot_menu(app):
     """Асинхронне додавання команд у меню бота після ініціалізації додатку."""
+    # Встановлюємо базові (дефолтні) команди — без `start`, оскільки
+    # підписка/відписка налаштовуються індивідуально для кожного чату.
     commands = [
-        BotCommand("start", "Почати роботу з ботом"),
         BotCommand("check", "Перевірити наявність світла"),
         BotCommand("help", "Показати довідку")
     ]
@@ -70,6 +71,23 @@ async def send_welcome_message(update: Update, context: CallbackContext) -> None
         logger.info("send_welcome_message: upsert finished for %s", telegram_id)
     except Exception:
         logger.exception("Не вдалося додати або оновити користувача в базі")
+
+    # Оновлюємо меню команд конкретно для цього чату відповідно до статусу підписки
+    try:
+        user_subscribed = await asyncio.to_thread(get_user_subscription, telegram_id)
+        chat_commands = [
+            BotCommand("check", "Перевірити наявність світла"),
+            BotCommand("help", "Показати довідку")
+        ]
+        if user_subscribed is True:
+            chat_commands.insert(0, BotCommand("unsubscribe", "Відписатись"))
+        else:
+            chat_commands.insert(0, BotCommand("subscribe", "Підписатись"))
+
+        await context.application.bot.set_my_commands(chat_commands, scope=BotCommandScopeChat(chat_id=telegram_id))
+        logger.info("Set chat-scoped commands for %s: %s", telegram_id, [c.command for c in chat_commands])
+    except Exception:
+        logger.exception("Не вдалося встановити меню команд для чату")
 
     # Отримуємо клавіатуру з кнопками 'Підписатись'/'Відписатись' і 'Перевірити'
     keyboard = get_subscription_keyboard(telegram_id)
@@ -105,6 +123,16 @@ async def handle_text_message(update: Update, context: CallbackContext) -> None:
             keyboard = get_subscription_keyboard(telegram_id)
             reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
             await update.message.reply_text('Натисніть для подальших дій:', reply_markup=reply_markup)
+            # Оновлюємо chat-scoped меню команд
+            try:
+                chat_commands = [
+                    BotCommand("unsubscribe", "Відписатись"),
+                    BotCommand("check", "Перевірити наявність світла"),
+                    BotCommand("help", "Показати довідку")
+                ]
+                await context.application.bot.set_my_commands(chat_commands, scope=BotCommandScopeChat(chat_id=telegram_id))
+            except Exception:
+                logger.exception("Failed to update chat commands after subscribe")
         elif text == '🔕 Відписатись':
             logger.info("handle_text_message: unsubscribe requested for %s", telegram_id)
             await asyncio.to_thread(update_subscription, telegram_id, False)
@@ -114,6 +142,16 @@ async def handle_text_message(update: Update, context: CallbackContext) -> None:
             keyboard = get_subscription_keyboard(telegram_id)
             reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
             await update.message.reply_text('Натисніть для подальших дій:', reply_markup=reply_markup)
+            # Оновлюємо chat-scoped меню команд
+            try:
+                chat_commands = [
+                    BotCommand("subscribe", "Підписатись"),
+                    BotCommand("check", "Перевірити наявність світла"),
+                    BotCommand("help", "Показати довідку")
+                ]
+                await context.application.bot.set_my_commands(chat_commands, scope=BotCommandScopeChat(chat_id=telegram_id))
+            except Exception:
+                logger.exception("Failed to update chat commands after unsubscribe")
         elif text == '🔌 Перевірити наявність електроенергії':
             await update.message.reply_text("🔄 Перевіряю наявність електроенергії...")
             try:
@@ -148,6 +186,53 @@ async def help_command(update: Update, context: CallbackContext) -> None:
 
     await update.message.reply_text(help_text)
 
+
+async def subscribe_command(update: Update, context: CallbackContext) -> None:
+    """Обробник команди /subscribe"""
+    if not update.message or not update.effective_user:
+        return
+    telegram_id = update.effective_user.id
+    first_name = update.effective_user.first_name or ''
+    try:
+        await asyncio.to_thread(add_user, telegram_id, first_name, True)
+        await update.message.reply_text('✅ Ви підписалися на отримання оновлень.')
+        # Оновлюємо chat-scoped меню команд
+        try:
+            chat_commands = [
+                BotCommand("unsubscribe", "Відписатись"),
+                BotCommand("check", "Перевірити наявність світла"),
+                BotCommand("help", "Показати довідку")
+            ]
+            await context.application.bot.set_my_commands(chat_commands, scope=BotCommandScopeChat(chat_id=telegram_id))
+        except Exception:
+            logger.exception("Failed to update chat commands after /subscribe")
+    except Exception:
+        logger.exception("Error handling /subscribe")
+        await update.message.reply_text('Сталася помилка. Спробуйте пізніше.')
+
+
+async def unsubscribe_command(update: Update, context: CallbackContext) -> None:
+    """Обробник команди /unsubscribe"""
+    if not update.message or not update.effective_user:
+        return
+    telegram_id = update.effective_user.id
+    try:
+        await asyncio.to_thread(update_subscription, telegram_id, False)
+        await update.message.reply_text('❌ Ви відписалися від отримання оновлень.')
+        # Оновлюємо chat-scoped меню команд
+        try:
+            chat_commands = [
+                BotCommand("subscribe", "Підписатись"),
+                BotCommand("check", "Перевірити наявність світла"),
+                BotCommand("help", "Показати довідку")
+            ]
+            await context.application.bot.set_my_commands(chat_commands, scope=BotCommandScopeChat(chat_id=telegram_id))
+        except Exception:
+            logger.exception("Failed to update chat commands after /unsubscribe")
+    except Exception:
+        logger.exception("Error handling /unsubscribe")
+        await update.message.reply_text('Сталася помилка. Спробуйте пізніше.')
+
 async def check_command(update: Update, context: CallbackContext) -> None:
     """Обробник команди /check"""
     # Поводимося так само, як при натисканні кнопки клавіатури
@@ -174,6 +259,8 @@ def main() -> None:
     application.add_handler(CommandHandler("start", send_welcome_message))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("check", check_command))
+    application.add_handler(CommandHandler("subscribe", subscribe_command))
+    application.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
 
     # Додаємо обробник зміни статусу члена чату (коли користувач приєднується)
     application.add_handler(ChatMemberHandler(chat_member_handler))  # Правильний спосіб
