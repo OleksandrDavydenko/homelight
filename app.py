@@ -206,6 +206,13 @@ async def subscribe_command(update: Update, context: CallbackContext) -> None:
             await context.application.bot.set_my_commands(chat_commands, scope=BotCommandScopeChat(chat_id=telegram_id))
         except Exception:
             logger.exception("Failed to update chat commands after /subscribe")
+        # Оновлюємо клавіатуру користувача
+        try:
+            keyboard = get_subscription_keyboard(telegram_id)
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+            await update.message.reply_text('Натисніть для подальших дій:', reply_markup=reply_markup)
+        except Exception:
+            logger.exception("Failed to update reply keyboard after /subscribe")
     except Exception:
         logger.exception("Error handling /subscribe")
         await update.message.reply_text('Сталася помилка. Спробуйте пізніше.')
@@ -229,6 +236,13 @@ async def unsubscribe_command(update: Update, context: CallbackContext) -> None:
             await context.application.bot.set_my_commands(chat_commands, scope=BotCommandScopeChat(chat_id=telegram_id))
         except Exception:
             logger.exception("Failed to update chat commands after /unsubscribe")
+        # Оновлюємо клавіатуру користувача
+        try:
+            keyboard = get_subscription_keyboard(telegram_id)
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+            await update.message.reply_text('Натисніть для подальших дій:', reply_markup=reply_markup)
+        except Exception:
+            logger.exception("Failed to update reply keyboard after /unsubscribe")
     except Exception:
         logger.exception("Error handling /unsubscribe")
         await update.message.reply_text('Сталася помилка. Спробуйте пізніше.')
