@@ -31,7 +31,7 @@ async def notify_subscribers(bot: Bot, message: str):
             await asyncio.sleep(0.05)  # small pause to avoid hitting rate limits
         except Exception as e:
             logger.exception("Failed to send message to %s: %s", user_id, e)
-
+#перевірити чи працює
 
 async def monitor_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
