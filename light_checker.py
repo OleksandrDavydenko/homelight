@@ -1,176 +1,207 @@
-import tinytuya
+import requests
 import time
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
-from config import ACCESS_ID, ACCESS_SECRET, DEVICE_ID, TUYA_REGION, TIMEZONE
+from config import SHELLY_AUTH_KEY, SHELLY_BASE_URL, TARGET_MAC, TIMEZONE
 
 class LightChecker:
     def __init__(self):
-        self.access_id = ACCESS_ID
-        self.access_secret = ACCESS_SECRET
-        self.device_id = DEVICE_ID
-        self.region = TUYA_REGION
+        self.auth_key = SHELLY_AUTH_KEY
+        self.base_url = SHELLY_BASE_URL
+        self.target_mac = TARGET_MAC
         
+    def fetch_all_status(self, max_retries=5):
+        """Отримання статусу всіх пристроїв з Shelly Cloud"""
+        url = f"{self.base_url}/device/all_status"
+        payload = {"auth_key": self.auth_key}
+
+        delay = 2
+        for attempt in range(1, max_retries + 1):
+            try:
+                print(f"📡 [Shelly API] Спроба {attempt}/{max_retries} отримати дані...")
+                r = requests.post(url, data=payload, timeout=15)
+
+                if r.status_code == 429:
+                    print(f"⚠️ [Shelly API] 429 Too many requests. Чекаю {delay}s...")
+                    time.sleep(delay)
+                    delay = min(delay * 2, 30)
+                    continue
+
+                if r.status_code != 200:
+                    print(f"❌ [Shelly API] HTTP помилка: {r.status_code}")
+                    print(f"❌ [Shelly API] Тіло відповіді: {r.text[:300]}")
+                    r.raise_for_status()
+
+                j = r.json()
+                if not j.get("isok"):
+                    raise RuntimeError(f"❌ [Shelly API] API помилка: {j}")
+
+                print(f"✅ [Shelly API] Дані успішно отримано")
+                return j["data"]["devices_status"]
+
+            except requests.exceptions.RequestException as e:
+                print(f"❌ [Shelly API] Помилка запиту: {e}")
+                if attempt < max_retries:
+                    print(f"🔄 [Shelly API] Повторна спроба через {delay} сек...")
+                    time.sleep(delay)
+                    delay = min(delay * 2, 30)
+                else:
+                    raise RuntimeError(f"Не вдалося отримати дані після {max_retries} спроб")
+
+        raise RuntimeError("Не вдалося отримати дані: постійний 429 (rate limit). Спробуйте через 1-2 хвилини.")
+
+    def pick_device(self, devices_status: dict):
+        """Вибір цільового пристрою"""
+        if not devices_status:
+            raise RuntimeError("❌ [Shelly API] devices_status порожній")
+
+        # Якщо вказано конкретний MAC
+        if self.target_mac:
+            mac_lower = self.target_mac.lower()
+            mac_upper = self.target_mac.upper()
+            
+            # Шукаємо в різних форматах
+            for mac in [mac_lower, mac_upper, self.target_mac]:
+                if mac in devices_status:
+                    print(f"✅ [Shelly API] Знайдено цільовий пристрій: {mac}")
+                    return mac, devices_status[mac]
+            
+            print(f"⚠️ [Shelly API] Не знайдено пристрій з MAC: {self.target_mac}")
+            print(f"⚠️ [Shelly API] Доступні пристрої: {list(devices_status.keys())}")
+        
+        # Беремо перший пристрій
+        first_mac = next(iter(devices_status.keys()))
+        print(f"⚠️ [Shelly API] Використовується перший пристрій: {first_mac}")
+        return first_mac, devices_status[first_mac]
+
+    def analyze_device_data(self, mac: str, device_data: dict):
+        """Аналіз даних пристрою та визначення статусу світла"""
+        print(f"📊 [Shelly API] Аналіз даних для пристрою {mac}...")
+        
+        current_time = int(time.time())
+        
+        # Отримуємо системну інформацію
+        sys_info = device_data.get('sys', {})
+        online = sys_info.get('mac') is not None  # Якщо є MAC, пристрій існує
+        
+        if not online:
+            print(f"⚠️ [Shelly API] Пристрій {mac} не знайдено або OFFLINE")
+            return {
+                "has_light": False,
+                "online": False,
+                "reason": "device_offline",
+                "device_name": f"Shelly Device {mac[-6:]}",
+                "last_update_time": current_time,
+                "mac": mac
+            }
+        
+        # Перевіряємо чи пристрій онлайн в хмарі
+        cloud_connected = device_data.get('cloud', {}).get('connected', False)
+        if not cloud_connected:
+            print(f"⚠️ [Shelly API] Пристрій {mac} не підключений до хмари")
+            return {
+                "has_light": None,
+                "online": True,  # Пристрій існує, але не в хмарі
+                "reason": "cloud_disconnected",
+                "device_name": f"Shelly Device {mac[-6:]}",
+                "last_update_time": sys_info.get('last_sync_ts', current_time),
+                "mac": mac
+            }
+        
+        # Шукаємо switch пристрій для перевірки напруги
+        voltage = None
+        power = None
+        current_amp = None
+        frequency = None
+        switch_state = None
+        
+        # Шукаємо всі ключі, що починаються з 'switch'
+        for key, value in device_data.items():
+            if key.startswith('switch'):
+                print(f"🔌 [Shelly API] Знайдено {key}")
+                
+                if isinstance(value, dict):
+                    voltage = value.get('voltage')
+                    power = value.get('apower')
+                    current_amp = value.get('current')
+                    frequency = value.get('freq')
+                    switch_state = value.get('output')
+                    
+                    print(f"📊 [Shelly API] Напруга: {voltage} V")
+                    print(f"📊 [Shelly API] Потужність: {power} W")
+                    print(f"📊 [Shelly API] Струм: {current_amp} A")
+                    print(f"📊 [Shelly API] Частота: {frequency} Hz")
+                    print(f"📊 [Shelly API] Стан виходу: {'ON' if switch_state else 'OFF'}")
+                    break
+        
+        # Визначаємо, чи є світло
+        has_light = False
+        
+        if voltage is not None:
+            if voltage > 100:  # Якщо напруга більше 100В
+                print(f"✅ [Shelly API] Напруга більше 100В ({voltage} V)")
+                if power is not None and power > 0:
+                    # Є напруга і споживання - точно є світло
+                    has_light = True
+                    print(f"✅ [Shelly API] Є споживання: {power} W - світло Є")
+                elif current_amp is not None and current_amp > 0:
+                    # Є напруга і струм - точно є світло
+                    has_light = True
+                    print(f"✅ [Shelly API] Є струм: {current_amp} A - світло Є")
+                else:
+                    # Є напруга, але немає споживання
+                    print(f"⚠️ [Shelly API] Напруга є, але немає споживання")
+                    has_light = True  # Напруга є - припускаємо що світло є
+            else:
+                # Напруги немає або вона дуже низька
+                print(f"❌ [Shelly API] Напруга менше 100В ({voltage} V) - світла НЕМАЄ")
+                has_light = False
+        else:
+            # Не вдалося отримати напругу
+            print(f"⚠️ [Shelly API] Не вдалося отримати напругу")
+            has_light = None
+        
+        # Отримуємо назву пристрою
+        device_name = f"Shelly {device_data.get('code', 'Device')} ({mac[-6:]})"
+        
+        print(f"📊 [Shelly API] Підсумок: світло {'Є' if has_light else 'Немає' if has_light is False else 'Невідомо'}")
+        
+        return {
+            "has_light": has_light,
+            "online": True,
+            "voltage": voltage,
+            "power": power,
+            "current": current_amp,
+            "frequency": frequency,
+            "switch_state": switch_state,
+            "device_name": device_name,
+            "ip_address": device_data.get('wifi', {}).get('sta_ip'),
+            "timestamp": current_time,
+            "last_update_time": sys_info.get('last_sync_ts', current_time),
+            "mac": mac
+        }
+    
     def get_real_device_status(self):
-        """Отримання реального статусу пристрою з перевіркою онлайн статусу"""
-        print(f"🔧 [Tuya API] Початок перевірки для пристрою: {self.device_id}")
-        print(f"🔧 [Tuya API] Регіон: {self.region}")
-        print(f"🔧 [Tuya API] Access ID: {self.access_id[:10]}...")
+        """Отримання реального статусу пристрою з Shelly Cloud"""
+        print(f"🔧 [Shelly API] Початок перевірки")
+        print(f"🔧 [Shelly API] Base URL: {self.base_url}")
+        print(f"🔧 [Shelly API] Target MAC: {self.target_mac if self.target_mac else 'автоматичний вибір'}")
         
         try:
-            # Підключаємося до європейського регіону
-            print(f"🔧 [Tuya API] Створення підключення до Tuya Cloud...")
-            cloud = tinytuya.Cloud(
-                apiRegion=self.region,
-                apiKey=self.access_id,
-                apiSecret=self.access_secret,
-                apiDeviceID=self.device_id
-            )
+            # Отримуємо дані з Shelly Cloud
+            devices_status = self.fetch_all_status()
             
-            # 1. Отримуємо інформацію про пристрій
-            print(f"📡 [Tuya API] Виклик cloud.getdevices('{self.device_id}')...")
-            devices_info = cloud.getdevices(self.device_id)
+            # Обираємо пристрій
+            mac, device_data = self.pick_device(devices_status)
             
-            print(f"📡 [Tuya API] Відповідь getdevices():")
-            print(f"📡 [Tuya API] Тип відповіді: {type(devices_info)}")
+            print(f"✅ [Shelly API] Обрано пристрій: {mac}")
             
-            # Логуємо відповідь (обмежуємо довжину для безпеки)
-            if devices_info is not None:
-                response_str = str(devices_info)
-                if len(response_str) > 500:
-                    response_str = response_str[:500] + "..."
-                print(f"📡 [Tuya API] Вміст відповіді: {response_str}")
+            # Аналізуємо дані
+            return self.analyze_device_data(mac, device_data)
             
-            if devices_info and devices_info.get("success"):
-                devices_list = devices_info.get("result", [])
-                print(f"✅ [Tuya API] Успішна відповідь, знайдено {len(devices_list)} пристроїв")
-                
-                # Шукаємо нашу розетку
-                our_device = None
-                for idx, device in enumerate(devices_list):
-                    device_id = device.get("id", "немає")
-                    device_name = device.get("name", "без назви")
-                    print(f"🔍 [Tuya API] Пристрій #{idx+1}: {device_name} (ID: {device_id})")
-                    
-                    if device.get("id") == self.device_id:
-                        our_device = device
-                        print(f"🎯 [Tuya API] Знайдено цільовий пристрій!")
-                        break
-                
-                if our_device:
-                    device_name = our_device.get("name", "Пристрій")
-                    print(f"📱 [Tuya API] Назва пристрою: {device_name}")
-                    print(f"📍 [Tuya API] IP адреса: {our_device.get('ip')}")
-                    print(f"📊 [Tuya API] Категорія: {our_device.get('category')}")
-                    
-                    # КЛЮЧОВЕ: Перевіряємо онлайн статус
-                    online_status = our_device.get("online", False)
-                    update_time = our_device.get("update_time", 0)
-                    current_time = int(time.time())
-                    
-                    print(f"🌐 [Tuya API] Статус підключення: {'🟢 ONLINE' if online_status else '🔴 OFFLINE'}")
-                    
-                    if update_time > 0:
-                        # Показуємо час у часовій зоні з конфігурації
-                        try:
-                            tz = ZoneInfo(TIMEZONE)
-                            last_seen_dt = datetime.fromtimestamp(update_time, tz=timezone.utc).astimezone(tz)
-                            last_seen = last_seen_dt.strftime("%Y-%m-%d %H:%M:%S")
-                        except Exception:
-                            last_seen = datetime.fromtimestamp(update_time).strftime("%Y-%m-%d %H:%M:%S")
-                        seconds_ago = current_time - update_time
-                        print(f"🕒 [Tuya API] Час останнього оновлення: {last_seen}")
-                        print(f"⏱️ [Tuya API] Секунд тому: {seconds_ago}")
-                    
-                    if not online_status:
-                        offline_minutes = (current_time - update_time) // 60
-                        print(f"⚠️ [Tuya API] Пристрій OFFLINE вже {offline_minutes} хвилин!")
-                        
-                        return {
-                            "has_light": False,
-                            "online": False,
-                            "reason": "device_offline",
-                            "offline_since": update_time,
-                            "offline_minutes": offline_minutes,
-                            "device_name": device_name,
-                            "ip_address": our_device.get("ip"),
-                            "last_update_time": update_time
-                        }
-                    else:
-                        # Якщо пристрій онлайн, перевіряємо реальні показники
-                        print(f"🔄 [Tuya API] Отримуємо поточний статус...")
-                        status_data = cloud.getstatus(self.device_id)
-                        
-                        print(f"📡 [Tuya API] Відповідь getstatus():")
-                        if status_data is not None:
-                            status_str = str(status_data)
-                            if len(status_str) > 500:
-                                status_str = status_str[:500] + "..."
-                            print(f"📡 [Tuya API] Вміст: {status_str}")
-                        
-                        if status_data and status_data.get("success"):
-                            print(f"✅ [Tuya API] Успішно отримано детальний статус")
-                            return self.analyze_current_status(status_data, our_device, current_time)
-                        else:
-                            print(f"❌ [Tuya API] Не вдалося отримати поточний статус")
-                            return {
-                                "has_light": None, 
-                                "online": True, 
-                                "reason": "status_unavailable",
-                                "device_name": device_name,
-                                "last_update_time": update_time
-                            }
-                else:
-                    print(f"❌ [Tuya API] Пристрій {self.device_id} не знайдено в списку")
-                    return {
-                        "has_light": None, 
-                        "online": None, 
-                        "reason": "device_not_found",
-                        "last_update_time": None
-                    }
-            else:
-                # Детально логуємо помилку
-                print(f"❌ [Tuya API] Помилка API!")
-                
-                if devices_info is None:
-                    error_msg = "Відповідь None"
-                elif isinstance(devices_info, dict):
-                    if "success" in devices_info:
-                        print(f"📊 [Tuya API] success: {devices_info.get('success')}")
-                    
-                    if "msg" in devices_info:
-                        error_msg = devices_info.get("msg", "Невідома помилка")
-                        print(f"📊 [Tuya API] msg: {error_msg}")
-                    
-                    if "code" in devices_info:
-                        error_code = devices_info.get("code", "немає")
-                        print(f"📊 [Tuya API] code: {error_code}")
-                    
-                    if "Err" in devices_info:
-                        error_err = devices_info.get("Err", "немає")
-                        print(f"📊 [Tuya API] Err: {error_err}")
-                    
-                    if "Error" in devices_info:
-                        error_error = devices_info.get("Error", "немає")
-                        print(f"📊 [Tuya API] Error: {error_error}")
-                    
-                    if "Payload" in devices_info:
-                        payload = devices_info.get("Payload", "немає")
-                        print(f"📊 [Tuya API] Payload: {payload}")
-                else:
-                    error_msg = f"Невідомий тип відповіді: {type(devices_info)}"
-                
-                return {
-                    "has_light": None, 
-                    "online": None, 
-                    "reason": "api_error",
-                    "error_details": devices_info,
-                    "last_update_time": None
-                }
-                
         except Exception as e:
-            print(f"💥 [Tuya API] Виняток: {type(e).__name__}: {str(e)}")
+            print(f"💥 [Shelly API] Виняток: {type(e).__name__}: {str(e)}")
             import traceback
             traceback.print_exc()
             
@@ -178,81 +209,8 @@ class LightChecker:
                 "has_light": None, 
                 "online": None, 
                 "reason": f"connection_error: {str(e)}",
-                "last_update_time": None
+                "last_update_time": int(time.time())
             }
-    
-    def analyze_current_status(self, status_data, device_info, current_time):
-        """Аналіз поточного статусу пристрою"""
-        print(f"📊 [Tuya API] Аналіз поточного статусу...")
-        
-        result = status_data.get("result", [])
-        print(f"📊 [Tuya API] Знайдено {len(result)} параметрів")
-        
-        # Знаходимо ключові параметри
-        voltage = None
-        power = None
-        current = None
-        switch_state = None
-        
-        for idx, item in enumerate(result):
-            code = item.get("code")
-            value = item.get("value")
-            print(f"📊 [Tuya API] Параметр #{idx+1}: code={code}, value={value}")
-            
-            if code == "cur_voltage":
-                voltage = value / 10  # Конвертуємо в вольти
-                print(f"🔌 [Tuya API] Напруга: {voltage:.1f} В")
-            elif code == "cur_power":
-                power = value / 10  # Конвертуємо в вати
-                print(f"💡 [Tuya API] Потужність: {power:.1f} Вт")
-            elif code == "cur_current":
-                current = value / 1000  # Конвертуємо в ампери
-                print(f"📊 [Tuya API] Струм: {current:.3f} А")
-            elif code == "switch_1":
-                switch_state = value
-                print(f"⚡ [Tuya API] Стан розетки: {'ВКЛЮЧЕНО' if value else 'ВИМКНЕНО'}")
-        
-        # Визначаємо, чи є світло
-        has_light = False
-        
-        if voltage is not None:
-            if voltage > 100:  # Якщо напруга більше 100В
-                print(f"✅ [Tuya API] Напруга більше 100В ({voltage:.1f} В)")
-                if power is not None and power > 0:
-                    # Є напруга і споживання - точно є світло
-                    has_light = True
-                    print(f"✅ [Tuya API] Є споживання: {power:.1f} Вт - світло Є")
-                elif current is not None and current > 0:
-                    # Є напруга і струм - точно є світло
-                    has_light = True
-                    print(f"✅ [Tuya API] Є струм: {current:.3f} А - світло Є")
-                else:
-                    # Є напруга, але немає споживання
-                    print(f"⚠️ [Tuya API] Напруга є, але немає споживання")
-                    has_light = True  # Напруга є - припускаємо що світло є
-            else:
-                # Напруги немає або вона дуже низька
-                print(f"❌ [Tuya API] Напруга менше 100В ({voltage:.1f} В) - світла НЕМАЄ")
-                has_light = False
-        else:
-            # Не вдалося отримати напругу
-            print(f"⚠️ [Tuya API] Не вдалося отримати напругу")
-            has_light = None
-        
-        print(f"📊 [Tuya API] Підсумок: світло {'Є' if has_light else 'Немає' if has_light is False else 'Невідомо'}")
-        
-        return {
-            "has_light": has_light,
-            "online": device_info.get("online", False),
-            "voltage": voltage,
-            "power": power,
-            "current": current,
-            "switch_state": switch_state,
-            "device_name": device_info.get("name"),
-            "ip_address": device_info.get("ip"),
-            "timestamp": current_time,
-            "last_update_time": device_info.get("update_time", 0)
-        }
     
     def format_time_ago(self, timestamp):
         """Форматує час у зрозумілий формат"""
@@ -297,22 +255,23 @@ class LightChecker:
         # Конвертуємо timestamp у datetime з урахуванням обраної часової зони
         try:
             tz = ZoneInfo(TIMEZONE)
-            dt = datetime.fromtimestamp(timestamp, tz=timezone.utc).astimezone(tz)
+            dt = datetime.fromtimestamp(timestamp)
+            dt_local = dt.astimezone(tz)
             now_dt = datetime.now(tz)
         except Exception:
-            dt = datetime.fromtimestamp(timestamp)
+            dt_local = datetime.fromtimestamp(timestamp)
             now_dt = datetime.now()
 
-        diff = now_dt - dt
+        diff = now_dt - dt_local
         diff_seconds = int(diff.total_seconds())
 
         # Форматуємо дату
-        if dt.date() == now_dt.date():
-            time_str = dt.strftime("сьогодні о %H:%M")
-        elif dt.date() == (now_dt - timedelta(days=1)).date():
-            time_str = dt.strftime("вчора о %H:%M")
+        if dt_local.date() == now_dt.date():
+            time_str = dt_local.strftime("сьогодні о %H:%M")
+        elif dt_local.date() == (now_dt - timedelta(days=1)).date():
+            time_str = dt_local.strftime("вчора о %H:%M")
         else:
-            time_str = dt.strftime("%d.%m о %H:%M")
+            time_str = dt_local.strftime("%d.%m о %H:%M")
 
         # Додаємо скільки часу тому
         if diff_seconds < 60:
@@ -333,13 +292,15 @@ class LightChecker:
     def check_light_status(self):
         """Основна функція для перевірки статусу світла"""
         print(f"\n" + "="*60)
-        print(f"🔌 [BOT] Початок перевірки світла")
+        print(f"🔌 [BOT] Початок перевірки світла через Shelly API")
         print(f"="*60)
         
         status = self.get_real_device_status()
         
         print(f"\n📋 [BOT] Результат перевірки:")
-        print(f"📋 [BOT] Статус: {status}")
+        for key, value in status.items():
+            if key not in ['error_details']:  # Пропускаємо великі об'єкти
+                print(f"📋 [BOT] {key}: {value}")
         
         # Отримуємо інформацію про час
         last_update_time = status.get("last_update_time", 0)
@@ -347,21 +308,42 @@ class LightChecker:
         
         # Формуємо зрозуміле повідомлення для користувача
         if status.get("online") is False:
-            offline_minutes = status.get("offline_minutes", 0)
-            offline_duration = self.format_duration(offline_minutes)
+            offline_since = status.get("last_update_time", 0)
+            if offline_since:
+                offline_minutes = (int(time.time()) - offline_since) // 60
+                offline_duration = self.format_duration(offline_minutes)
+            else:
+                offline_duration = "невідомо"
             
             result = (
                 f"🔴 СТАН: НЕМАЄ СВІТЛА\n\n"
                 f"⏱️ Час відключення: {offline_duration}\n"
                 f"{time_info}\n\n"
+                f"💡 Пристрій OFFLINE"
             )
             
         elif status.get("has_light") is True:
             voltage = status.get("voltage", 0)
+            power = status.get("power", 0)
+            current = status.get("current", 0)
+            frequency = status.get("frequency", 0)
+            
+            # Формуємо детальну інформацію
+            details = []
+            if voltage:
+                details.append(f"🔌 Напруга: {voltage} В")
+            if power:
+                details.append(f"💡 Потужність: {power} Вт")
+            if current:
+                details.append(f"⚡ Струм: {current} А")
+            if frequency:
+                details.append(f"〰️  Частота: {frequency} Гц")
+            
+            details_str = "\n".join(details)
             
             result = (
                 f"✅ СТАН: СВІТЛО Є\n\n"
-                f"🔌 Напруга в мережі: {voltage:.1f} В\n"
+                f"{details_str}\n"
                 f"{time_info}\n\n"
                 f"💡 Електропостачання працює стабільно"
             )
@@ -371,40 +353,25 @@ class LightChecker:
             
             result = (
                 f"❌ СТАН: СВІТЛА НЕМАЄ\n\n"
-                f"🔌 Напруга в мережі: {voltage:.1f} В\n"
+                f"🔌 Напруга в мережі: {voltage} В\n"
                 f"{time_info}\n\n"
                 f"💡 Відсутнє електропостачання"
             )
             
-        elif status.get("reason") == "status_unavailable":
+        elif status.get("reason") == "cloud_disconnected":
             result = (
-                f"⚠️ СТАН: ДАНІ НЕДОСТУПНІ\n\n"
+                f"⚠️ СТАН: НЕМАЄ ПІДКЛЮЧЕННЯ ДО ХМАРИ\n\n"
                 f"{time_info}\n\n"
-                f"💡 Пристрій онлайн, але дані про напругу відсутні"
+                f"💡 Пристрій працює, але не підключений до Shelly Cloud"
             )
             
-        elif status.get("reason") == "api_error":
-            error_details = status.get("error_details", {})
-            
-            # Спроба отримати детальну інформацію про помилку
-            if isinstance(error_details, dict):
-                if "Error" in error_details:
-                    error_msg = error_details.get("Error", "Невідома помилка")
-                elif "msg" in error_details:
-                    error_msg = error_details.get("msg", "Невідома помилка")
-                else:
-                    error_msg = str(error_details)
-            else:
-                error_msg = str(error_details)
-            
-            # Обрізаємо довгий текст
-            if len(error_msg) > 100:
-                error_msg = error_msg[:100] + "..."
+        elif "connection_error" in str(status.get("reason", "")):
+            reason = status.get("reason", "невідома помилка")
             
             result = (
                 f"❌ ПОМИЛКА ПІДКЛЮЧЕННЯ\n\n"
-                f"ℹ️ {error_msg}\n\n"
-                f"💡 Перевірте з'єднання з сервісом"
+                f"ℹ️ {reason}\n\n"
+                f"💡 Перевірте з'єднання з Shelly Cloud"
             )
             
         else:
@@ -421,9 +388,16 @@ class LightChecker:
             current_time = datetime.now(tz).strftime("%d.%m.%Y %H:%M:%S")
         except Exception:
             current_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        final_result = f"📊 ПЕРЕВІРКА: {current_time}\n\n{result}"
         
-        print(f"\n📤 [BOT] Відправляємо користувачу: {final_result}")
+        # Додаємо інформацію про пристрій
+        device_name = status.get("device_name", "Пристрій")
+        mac = status.get("mac", "немає")
+        device_header = f"📱 {device_name} ({mac})\n"
+        
+        final_result = f"📊 ПЕРЕВІРКА: {current_time}\n{device_header}\n{result}"
+        
+        print(f"\n📤 [BOT] Відправляємо користувачу:")
+        print(final_result)
         print(f"="*60 + "\n")
         
         return final_result
