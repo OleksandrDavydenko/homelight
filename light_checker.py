@@ -523,9 +523,10 @@ class LightChecker:
         device_info = ""
         mac = status.get("mac")
         device_name = status.get("device_name")
+        if mac and device_name:
+            device_info = f"📱 {device_name} ({mac})\n\n"
 
-
-        final_result = f"📊 ПЕРЕВІРКА: {current_time}\n"
+        final_result = f"📊 ПЕРЕВІРКА: {current_time}\n{result}"
         logger.info("Перевірка завершена")
 
         return final_result
