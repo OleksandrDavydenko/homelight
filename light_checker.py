@@ -18,9 +18,11 @@ INITIAL_RETRY_DELAY = 2  # сек
 MAX_RETRY_DELAY = 30  # сек
 REQUEST_TIMEOUT = 15  # сек
 STATE_FILE = "/tmp/homelight_state.json"
+OUTAGE_START_FILE = "/tmp/homelight_outage_start.json"  # Файл для зберігання часу початку відключення
 
 # Глобальний стан для зберігання протягом роботи dyno
 _current_state = None
+_outage_start_time = None
 
 def get_current_state() -> dict | None:
     """Отримати поточний стан зі змінної"""
@@ -32,6 +34,47 @@ def set_current_state(state: dict) -> None:
     global _current_state
     _current_state = state
     logger.debug(f"Стан оновлено в пам'яті: {state}")
+
+def get_outage_start_time() -> int | None:
+    """Отримати час початку відключення"""
+    global _outage_start_time
+    if _outage_start_time is None:
+        _outage_start_time = load_outage_start_time()
+    return _outage_start_time
+
+def set_outage_start_time(timestamp: int | None) -> None:
+    """Встановити час початку відключення"""
+    global _outage_start_time
+    _outage_start_time = timestamp
+    save_outage_start_time(timestamp)
+    if timestamp:
+        logger.info(f"Час початку відключення встановлено: {timestamp}")
+    else:
+        logger.info("Час початку відключення скинуто")
+
+def load_outage_start_time() -> int | None:
+    """Завантажити час початку відключення з файлу"""
+    try:
+        if os.path.exists(OUTAGE_START_FILE):
+            with open(OUTAGE_START_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                timestamp = data.get("outage_start")
+                if timestamp:
+                    logger.debug(f"Час початку відключення завантажено: {timestamp}")
+                    return timestamp
+    except Exception as e:
+        logger.exception(f"Помилка при завантаженні часу відключення: {e}")
+    return None
+
+def save_outage_start_time(timestamp: int | None) -> None:
+    """Зберегти час початку відключення у файл"""
+    try:
+        data = {"outage_start": timestamp}
+        with open(OUTAGE_START_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.debug(f"Час початку відключення збережено: {timestamp}")
+    except Exception as e:
+        logger.exception(f"Помилка при збереженні часу відключення: {e}")
 
 
 class LightChecker:
@@ -293,6 +336,23 @@ class LightChecker:
 
         return f"🕒 {time_str} ({ago})"
 
+    def format_duration(self, seconds: int) -> str:
+        """Форматує тривалість у зрозумілий формат"""
+        if seconds < 60:
+            return f"{seconds} секунд"
+        elif seconds < 3600:
+            minutes = seconds // 60
+            secs = seconds % 60
+            return f"{minutes} хв {secs} сек"
+        elif seconds < 86400:
+            hours = seconds // 3600
+            minutes = (seconds % 3600) // 60
+            return f"{hours} год {minutes} хв"
+        else:
+            days = seconds // 86400
+            hours = (seconds % 86400) // 3600
+            return f"{days} дн {hours} год"
+
     def check_light_status(self) -> str:
         """Основна функція для перевірки статусу світла"""
         logger.info("Початок перевірки світла")
@@ -318,15 +378,33 @@ class LightChecker:
         # Формуємо заголовок
         header = f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ: {check_time}\n\n"
 
+        # Отримуємо поточний час
+        current_time = int(time.time())
+        
+        # Отримуємо час початку відключення
+        outage_start = get_outage_start_time()
+        
+        # Логіка для відстеження відключення
         if not online or has_light is False:
-            # Світла немає - показуємо тільки результат і час
-            if time_info:
-                result = f"{header}❌ СВІТЛА НЕМАЄ\n\n{time_info}"
+            # Світла немає
+            if outage_start is None:
+                # Встановлюємо час початку відключення (перший раз)
+                set_outage_start_time(current_time)
+                outage_duration_info = ""
             else:
-                result = f"{header}❌ СВІТЛА НЕМАЄ"
+                # Розраховуємо тривалість відключення
+                outage_duration = current_time - outage_start
+                duration_str = self.format_duration(outage_duration)
+                outage_duration_info = f"⏱️ Час відключення: {duration_str}\n"
+            
+            # Формуємо повідомлення
+            if time_info:
+                result = f"{header}❌ СВІТЛА НЕМАЄ\n\n{outage_duration_info}{time_info}"
+            else:
+                result = f"{header}❌ СВІТЛА НЕМАЄ\n\n{outage_duration_info}".strip()
                 
         elif has_light is True:
-            # Світло є - показуємо напругу та частоту
+            # Світло є
             voltage_display = f"{voltage:.1f} В" if voltage is not None else "–"
             frequency_display = f"{frequency:.1f} Гц" if frequency is not None else "–"
             
@@ -336,7 +414,18 @@ class LightChecker:
             if time_info:
                 details += f"\n{time_info}"
             
-            result = f"{header}✅ СВІТЛО Є\n\n{details}"
+            # Додаємо інформацію про тривалість відключення, якщо воно було
+            outage_duration_info = ""
+            if outage_start:
+                outage_duration = current_time - outage_start
+                if outage_duration > 60:  # Якщо відключення було більше 1 хвилини
+                    duration_str = self.format_duration(outage_duration)
+                    outage_duration_info = f"\n\n💡 Світла не було: {duration_str}"
+                
+                # Скидаємо час початку відключення
+                set_outage_start_time(None)
+            
+            result = f"{header}✅ СВІТЛО Є\n\n{details}{outage_duration_info}"
             
             # Додаємо попередження про напругу
             if voltage_status == "low" and voltage is not None:
