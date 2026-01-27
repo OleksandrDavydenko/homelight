@@ -60,14 +60,24 @@ class LightChecker:
 
                 if r.status_code != 200:
                     logger.error(f"HTTP помилка: {r.status_code}, тіло: {r.text[:300]}")
+                    
+                    # Якщо це 401 Unauthorized
+                    if r.status_code == 401:
+                        j = r.json()
+                        error_msg = j.get("error", "Unauthorized")
+                        details = j.get("errors", {})
+                        raise RuntimeError(f"Помилка авторизації (401): {error_msg}. Деталі: {details}")
+                    
                     r.raise_for_status()
 
                 j = r.json()
                 if not j.get("isok"):
-                    raise RuntimeError(f"Shelly API помилка: {j}")
+                    error_msg = j.get("error", "Unknown API error")
+                    errors = j.get("errors", {})
+                    raise RuntimeError(f"Shelly API помилка: {error_msg}. Деталі: {errors}")
 
                 logger.info("Дані з Shelly API успішно отримано")
-                return j["data"]["devices_status"]
+                return j["data"]
 
             except requests.exceptions.RequestException as e:
                 logger.error(f"Помилка запиту: {e}")
@@ -80,10 +90,25 @@ class LightChecker:
 
         raise RuntimeError("Помилка: постійний 429 (rate limit). Спробуйте через 1-2 хвилини.")
 
-    def pick_device(self, devices_status: dict):
-        """Вибір цільового пристрою"""
+    def pick_device(self, data: dict):
+        """Вибір цільового пристрою з отриманих даних"""
+        # Отримуємо devices_status з даних
+        devices_status = data.get("devices_status", {})
+        
         if not devices_status:
-            raise RuntimeError("devices_status порожній")
+            # Детально логуємо, що ми отримали
+            logger.warning(f"devices_status порожній. Отримані дані мають ключі: {list(data.keys())}")
+            
+            # Може бути, що дані мають іншу структуру
+            if "error" in data:
+                error_msg = data.get("error", "Unknown error")
+                raise RuntimeError(f"API повернув помилку: {error_msg}")
+            
+            raise RuntimeError("devices_status порожній - немає пристроїв у вашому обліковому записі Shelly Cloud")
+
+        # Логуємо всі доступні пристрої
+        available_devices = list(devices_status.keys())
+        logger.info(f"Доступні пристрої: {available_devices}")
 
         # Якщо вказано конкретний MAC
         if self.target_mac:
@@ -93,7 +118,7 @@ class LightChecker:
                     return mac, devices_status[mac]
 
             logger.warning(f"Не знайдено пристрій з MAC: {self.target_mac}")
-            logger.info(f"Доступні пристрої: {list(devices_status.keys())}")
+            logger.info(f"Візьму перший доступний пристрій")
 
         # Беремо перший пристрій
         first_mac = next(iter(devices_status.keys()))
@@ -220,11 +245,72 @@ class LightChecker:
         logger.debug(f"Base URL: {self.base_url}, Target MAC: {self.target_mac or 'автоматичний вибір'}")
 
         try:
-            devices_status = self.fetch_all_status()
-            mac, device_data = self.pick_device(devices_status)
+            # Отримуємо всі дані
+            data = self.fetch_all_status()
+            
+            # Перевіряємо, чи є devices_status у даних
+            if "devices_status" not in data:
+                logger.error(f"В даних відсутній ключ 'devices_status'. Отримані ключі: {list(data.keys())}")
+                
+                # Перевіряємо, чи це помилка API
+                if not data.get("isok", True):
+                    error_msg = data.get("error", "Unknown API error")
+                    return {
+                        "has_light": None,
+                        "online": None,
+                        "reason": f"api_error: {error_msg}",
+                        "voltage_status": "unknown",
+                        "last_update_time": int(time.time()),
+                        "details": f"Shelly API повернула помилку: {error_msg}"
+                    }
+                
+                # Якщо немає пристроїв
+                return {
+                    "has_light": None,
+                    "online": False,
+                    "reason": "no_devices_in_account",
+                    "voltage_status": "unknown",
+                    "last_update_time": int(time.time()),
+                    "details": "Немає пристроїв у вашому обліковому записі Shelly Cloud"
+                }
+            
+            # Вибираємо пристрій
+            mac, device_data = self.pick_device(data)
             logger.info(f"Обрано пристрій: {mac}")
             return self.analyze_device_data(mac, device_data)
 
+        except RuntimeError as e:
+            error_msg = str(e)
+            logger.error(f"Помилка вибору пристрою: {error_msg}")
+            
+            # Перевіряємо тип помилки
+            if "devices_status порожній" in error_msg:
+                return {
+                    "has_light": None,
+                    "online": False,
+                    "reason": "no_devices_found",
+                    "voltage_status": "unknown",
+                    "last_update_time": int(time.time()),
+                    "details": "Немає пристроїв у вашому обліковому записі Shelly Cloud"
+                }
+            elif "Помилка авторизації" in error_msg:
+                return {
+                    "has_light": None,
+                    "online": None,
+                    "reason": "auth_error",
+                    "voltage_status": "unknown",
+                    "last_update_time": int(time.time()),
+                    "details": error_msg
+                }
+            else:
+                return {
+                    "has_light": None,
+                    "online": None,
+                    "reason": f"selection_error: {error_msg}",
+                    "voltage_status": "unknown",
+                    "last_update_time": int(time.time())
+                }
+                
         except Exception as e:
             logger.exception(f"Виняток: {type(e).__name__}: {str(e)}")
             return {
@@ -330,18 +416,25 @@ class LightChecker:
 
         # Формуємо зрозуміле повідомлення для користувача
         if status.get("online") is False:
-            offline_since = status.get("last_update_time", 0)
-            offline_duration = (
-                self._format_duration((int(time.time()) - offline_since) // 60)
-                if offline_since else "невідомо"
-            )
+            if status.get("reason") in ["no_devices_found", "no_devices_in_account"]:
+                result = (
+                    f"⚠️ СТАН: НЕМАЄ ПРИСТРОЇВ\n\n"
+                    f"ℹ️ Немає пристроїв у вашому обліковому записі Shelly Cloud\n\n"
+                    f"💡 Додайте пристрій до свого облікового запису на https://my.shelly.cloud"
+                )
+            else:
+                offline_since = status.get("last_update_time", 0)
+                offline_duration = (
+                    self._format_duration((int(time.time()) - offline_since) // 60)
+                    if offline_since else "невідомо"
+                )
 
-            result = (
-                f"🔴 СТАН: НЕМАЄ СВІТЛА\n\n"
-                f"⏱️ Час відключення: {offline_duration}\n"
-                f"{time_info}\n\n"
-                f"💡 Пристрій OFFLINE"
-            )
+                result = (
+                    f"🔴 СТАН: НЕМАЄ СВІТЛА\n\n"
+                    f"⏱️ Час відключення: {offline_duration}\n"
+                    f"{time_info}\n\n"
+                    f"💡 Пристрій OFFLINE"
+                )
 
         elif status.get("has_light") is True:
             voltage = status.get("voltage", 0)
@@ -365,9 +458,9 @@ class LightChecker:
             # Додаємо попередження про напругу
             voltage_warning = ""
             if voltage_status == "low":
-                voltage_warning = f"\n⚠️ ⚠️ НИЗЬКА НАПРУГА! ⚠️ ⚠️\nЗначення: {voltage} В (менше {LOW_VOLTAGE} В)\nНебезпечно для більшості приладів!"
+                voltage_warning = f"\n\n⚠️ ⚠️ НИЗЬКА НАПРУГА! ⚠️ ⚠️\nЗначення: {voltage} В (менше {LOW_VOLTAGE} В)\nНебезпечно для більшості приладів!"
             elif voltage_status == "high":
-                voltage_warning = f"\n⚠️ ⚠️ ВИСОКА НАПРУГА! ⚠️ ⚠️\nЗначення: {voltage} В (більше {HIGH_VOLTAGE} В)\nМоже пошкодити прилади! Вимкніть деякі прилади."
+                voltage_warning = f"\n\n⚠️ ⚠️ ВИСОКА НАПРУГА! ⚠️ ⚠️\nЗначення: {voltage} В (більше {HIGH_VOLTAGE} В)\nМоже пошкодити прилади! Вимкніть деякі прилади."
 
             result = (
                 f"✅ СТАН: СВІТЛО Є\n\n"
@@ -385,6 +478,14 @@ class LightChecker:
                 f"🔌 Напруга в мережі: {voltage} В\n"
                 f"{time_info}\n\n"
                 f"💡 Відсутнє електропостачання"
+            )
+            
+        elif status.get("reason") == "auth_error":
+            error_details = status.get("details", "Невірний токен авторизації")
+            result = (
+                f"❌ ПОМИЛКА АВТОРИЗАЦІЇ\n\n"
+                f"ℹ️ {error_details}\n\n"
+                f"💡 Оновіть SHELLY_AUTH_KEY у конфігурації або перевірте токен на https://my.shelly.cloud"
             )
 
         elif status.get("reason") == "cloud_disconnected":
@@ -417,7 +518,14 @@ class LightChecker:
         except Exception:
             current_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
 
-        final_result = f"📊 ПЕРЕВІРКА: {current_time}\n{result}"
+        # Додаємо інформацію про пристрій, якщо вона є
+        device_info = ""
+        mac = status.get("mac")
+        device_name = status.get("device_name")
+        if mac and device_name:
+            device_info = f"📱 {device_name} ({mac})\n\n"
+
+        final_result = f"📊 ПЕРЕВІРКА: {current_time}\n{device_info}{result}"
         logger.info("Перевірка завершена")
 
         return final_result
