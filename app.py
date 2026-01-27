@@ -155,10 +155,8 @@ async def handle_text_message(update: Update, context: CallbackContext) -> None:
         elif text == '🔌 Перевірити наявність електроенергії':
             await update.message.reply_text("🔄 Перевіряю наявність електроенергії...")
             try:
-                # Виконуємо перевірку в потоці, щоб не блокувати event loop
                 result = await asyncio.to_thread(light_checker.check_light_status)
-                # Надсилаємо нове повідомлення з результатом
-                await update.message.reply_text({result})
+                await update.message.reply_text(f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ:\n\n{result}")
             except Exception as e:
                 logger.error(f"Помилка при перевірці світла: {e}")
                 await update.message.reply_text("❌ Сталася помилка при перевірці. Спробуйте пізніше.")
