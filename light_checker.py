@@ -301,39 +301,51 @@ class LightChecker:
         last_update_time = status.get("last_update_time", 0)
         time_info = self.get_last_update_time(last_update_time)
 
-        # Отримуємо дані про напругу та частоту
+        # Отримуємо дані
         voltage = status.get("voltage")
         frequency = status.get("frequency")
         voltage_status = status.get("voltage_status", "unknown")
         has_light = status.get("has_light")
         online = status.get("online")
 
-        # Форматуємо дані про напругу та частоту
-        voltage_display = f"{voltage:.1f} В" if voltage is not None else "–"
-        frequency_display = f"{frequency:.1f} Гц" if frequency is not None else "–"
-        
-        details = f"🔌 Напруга: {voltage_display}\n〰️  Частота: {frequency_display}"
-        
-        # Додаємо інформацію про час
-        if time_info:
-            details += f"\n{time_info}"
+        # Отримуємо поточний час для заголовка
+        try:
+            tz = ZoneInfo(TIMEZONE)
+            check_time = datetime.now(tz).strftime("%d.%m.%Y %H:%M:%S")
+        except Exception:
+            check_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+
+        # Формуємо заголовок
+        header = f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ: {check_time}\n\n"
 
         if not online or has_light is False:
-            # Світла немає
-            result = f"❌ СВІТЛА НЕМАЄ\n\n{details}"
+            # Світла немає - показуємо тільки результат і час
+            if time_info:
+                result = f"{header}❌ СВІТЛА НЕМАЄ\n\n{time_info}"
+            else:
+                result = f"{header}❌ СВІТЛА НЕМАЄ"
                 
         elif has_light is True:
-            # Світло є
-            result = f"✅ СВІТЛО Є\n\n{details}"
+            # Світло є - показуємо напругу та частоту
+            voltage_display = f"{voltage:.1f} В" if voltage is not None else "–"
+            frequency_display = f"{frequency:.1f} Гц" if frequency is not None else "–"
+            
+            details = f"🔌 Напруга: {voltage_display}\n〰️  Частота: {frequency_display}"
+            
+            # Додаємо інформацію про час
+            if time_info:
+                details += f"\n{time_info}"
+            
+            result = f"{header}✅ СВІТЛО Є\n\n{details}"
             
             # Додаємо попередження про напругу
-            if voltage_status == "low":
+            if voltage_status == "low" and voltage is not None:
                 result += f"\n\n⚠️ УВАГА! Низька напруга ({voltage:.0f} В)"
-            elif voltage_status == "high":
+            elif voltage_status == "high" and voltage is not None:
                 result += f"\n\n⚠️ УВАГА! Висока напруга ({voltage:.0f} В)"
                 
         else:
             # Невідомий стан
-            result = f"❓ СТАН НЕВІДОМИЙ\n\n{details}"
+            result = f"{header}❓ СТАН НЕВІДОМИЙ"
 
         return result
