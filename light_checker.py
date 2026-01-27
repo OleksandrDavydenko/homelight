@@ -20,6 +20,20 @@ REQUEST_TIMEOUT = 15  # сек
 POLL_INTERVAL = 60  # сек
 STATE_FILE = "/tmp/homelight_state.json"  # Файл для збереження стану (використовуємо /tmp для Heroku)
 
+# Глобальний стан для зберігання протягом роботи dyno
+_current_state = None
+
+def get_current_state() -> dict | None:
+    """Отримати поточний стан зі змінної"""
+    global _current_state
+    return _current_state
+
+def set_current_state(state: dict) -> None:
+    """Зберегти поточний стан у змінну"""
+    global _current_state
+    _current_state = state
+    logger.debug(f"Стан оновлено в пам'яті: {state}")
+
 
 class LightChecker:
     def __init__(self):

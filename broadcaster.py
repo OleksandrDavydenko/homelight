@@ -5,7 +5,7 @@ import time
 from telegram import Bot
 from config import TELEGRAM_TOKEN
 from db import get_all_subscribed_users
-from light_checker import LightChecker
+from light_checker import LightChecker, get_current_state, set_current_state
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -13,7 +13,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL = 888  # seconds
+POLL_INTERVAL = 60  # seconds
 
 async def notify_subscribers(bot: Bot, message: str):
     """Відправка повідомлення всім підписаним користувачам"""
@@ -36,15 +36,13 @@ async def notify_subscribers(bot: Bot, message: str):
 async def monitor_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
     checker = LightChecker()
-    last_state = None
     iteration = 0
 
     logger.info("monitor_loop started")
-    # Завантажуємо попередній стан з файлу
-    saved_state = checker.load_state()
-    if saved_state:
-        last_state = saved_state
-        logger.info("Loaded saved state: %s", last_state)
+    # Завантажуємо попередній стан зі змінної пам'яті
+    last_state = get_current_state()
+    if last_state:
+        logger.info("Loaded saved state from memory: %s", last_state)
     
     while True:
         iteration += 1
@@ -69,7 +67,7 @@ async def monitor_loop():
                 # Перший запуск - зберігаємо стан
                 last_state = current_state
                 logger.info("Initial state: %s", current_state)
-                checker.save_state(current_state)
+                set_current_state(current_state)
             elif (
                 current_state["has_light"] != last_state.get("has_light") or
                 current_state["online"] != last_state.get("online") or
@@ -89,8 +87,8 @@ async def monitor_loop():
                 await notify_subscribers(bot, message)
                 logger.info("notify_subscribers completed")
                 
-                # Оновлюємо збережений стан
-                checker.save_state(current_state)
+                # Оновлюємо стан у пам'яті
+                set_current_state(current_state)
                 last_state = current_state
             else:
                 logger.debug("No change in state")
