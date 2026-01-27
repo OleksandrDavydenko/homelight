@@ -66,9 +66,9 @@ async def monitor_loop():
 
             if last_state is None:
                 # Перший запуск - зберігаємо стан
-                last_state = current_state
+                last_state = current_state.copy()
                 logger.info("Initial state: %s", current_state)
-                set_current_state(current_state)
+                set_current_state(current_state.copy())
             elif (
                 current_state["has_light"] != last_state.get("has_light") or
                 current_state["online"] != last_state.get("online") or
@@ -76,21 +76,25 @@ async def monitor_loop():
                 current_state["voltage_status"] != last_state.get("voltage_status") or
                 current_state["voltage"] != last_state.get("voltage")
             ):
-                # Стан змінився - надсилаємо повідомлення
-                logger.warning(
-                    "STATE CHANGED: %s -> %s",
-                    {k: v for k, v in last_state.items()},
-                    current_state
-                )
+                # Деталізований лог для налагодження
+                logger.warning("STATE CHANGE DETECTED:")
+                logger.warning(f"  has_light: {last_state.get('has_light')} -> {current_state['has_light']}")
+                logger.warning(f"  online: {last_state.get('online')} -> {current_state['online']}")
+                logger.warning(f"  reason: {last_state.get('reason')} -> {current_state['reason']}")
+                logger.warning(f"  voltage_status: {last_state.get('voltage_status')} -> {current_state['voltage_status']}")
+                logger.warning(f"  voltage: {last_state.get('voltage')} -> {current_state['voltage']}")
+                
                 logger.info("Formatting full message...")
                 message = await asyncio.to_thread(checker.check_light_status)
-                logger.info("Calling notify_subscribers...")
-                await notify_subscribers(bot, message)
-                logger.info("notify_subscribers completed")
+                logger.info("Formatted message: %s", message)
+                # ТИМЧАСОВО ДЕАКТИВОВАНО ДЛЯ НАЛАГОДЖЕННЯ
+                logger.info("SKIPPING notify_subscribers for debugging")
+                # await notify_subscribers(bot, message)
+                logger.info("Would have sent notification")
                 
                 # Оновлюємо стан у пам'яті
-                set_current_state(current_state)
-                last_state = current_state
+                set_current_state(current_state.copy())
+                last_state = current_state.copy()
             else:
                 logger.debug("No change in state")
         except Exception as e:
