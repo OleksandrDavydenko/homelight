@@ -195,29 +195,7 @@ class LightChecker:
                 "last_update_time": int(time.time())
             }
     
-    def format_time_ago(self, timestamp):
-        """Форматує час у зрозумілий формат"""
-        if not timestamp or timestamp == 0:
-            return "немає даних"
-        
-        current_time = int(time.time())
-        diff_seconds = current_time - timestamp
-        
-        if diff_seconds < 60:
-            return "щойно"
-        elif diff_seconds < 3600:
-            minutes = diff_seconds // 60
-            return f"{minutes} хв тому"
-        elif diff_seconds < 86400:
-            hours = diff_seconds // 3600
-            minutes = (diff_seconds % 3600) // 60
-            return f"{hours} год {minutes} хв тому"
-        else:
-            days = diff_seconds // 86400
-            hours = (diff_seconds % 86400) // 3600
-            return f"{days} дн {hours} год тому"
-    
-    def format_duration(self, minutes):
+    def _format_duration(self, minutes: int) -> str:
         """Форматує тривалість у зрозумілий формат"""
         if minutes < 60:
             return f"{minutes} хв"
@@ -229,13 +207,12 @@ class LightChecker:
             days = minutes // 1440
             hours = (minutes % 1440) // 60
             return f"{days} дн {hours} год"
-    
-    def get_last_update_time(self, timestamp):
+
+    def get_last_update_time(self, timestamp: int) -> str:
         """Отримує час останнього оновлення"""
         if not timestamp or timestamp == 0:
             return "Час оновлення: немає даних"
 
-        # Конвертуємо timestamp у datetime з урахуванням обраної часової зони
         try:
             tz = ZoneInfo(TIMEZONE)
             dt = datetime.fromtimestamp(timestamp)
@@ -272,46 +249,35 @@ class LightChecker:
 
         return f"🕒 Оновлено: {time_str} ({ago})"
     
-    def check_light_status(self):
+    def check_light_status(self) -> str:
         """Основна функція для перевірки статусу світла"""
-        print(f"\n" + "="*60)
-        print(f"🔌 [BOT] Початок перевірки світла через Shelly API")
-        print(f"="*60)
-        
+        logger.info("Початок перевірки світла")
+
         status = self.get_real_device_status()
-        
-        print(f"\n📋 [BOT] Результат перевірки:")
-        for key, value in status.items():
-            if key not in ['error_details']:  # Пропускаємо великі об'єкти
-                print(f"📋 [BOT] {key}: {value}")
-        
-        # Отримуємо інформацію про час
         last_update_time = status.get("last_update_time", 0)
         time_info = self.get_last_update_time(last_update_time)
-        
+
         # Формуємо зрозуміле повідомлення для користувача
         if status.get("online") is False:
             offline_since = status.get("last_update_time", 0)
-            if offline_since:
-                offline_minutes = (int(time.time()) - offline_since) // 60
-                offline_duration = self.format_duration(offline_minutes)
-            else:
-                offline_duration = "невідомо"
-            
+            offline_duration = (
+                self._format_duration((int(time.time()) - offline_since) // 60)
+                if offline_since else "невідомо"
+            )
+
             result = (
                 f"🔴 СТАН: НЕМАЄ СВІТЛА\n\n"
                 f"⏱️ Час відключення: {offline_duration}\n"
                 f"{time_info}\n\n"
                 f"💡 Пристрій OFFLINE"
             )
-            
+
         elif status.get("has_light") is True:
             voltage = status.get("voltage", 0)
             power = status.get("power", 0)
             current = status.get("current", 0)
             frequency = status.get("frequency", 0)
-            
-            # Формуємо детальну інформацію
+
             details = []
             if voltage:
                 details.append(f"🔌 Напруга: {voltage} В")
@@ -321,42 +287,39 @@ class LightChecker:
                 details.append(f"⚡ Струм: {current} А")
             if frequency:
                 details.append(f"〰️  Частота: {frequency} Гц")
-            
+
             details_str = "\n".join(details)
-            
             result = (
                 f"✅ СТАН: СВІТЛО Є\n\n"
                 f"{details_str}\n"
                 f"{time_info}\n\n"
                 f"💡 Електропостачання працює стабільно"
             )
-            
+
         elif status.get("has_light") is False:
             voltage = status.get("voltage", 0)
-            
             result = (
                 f"❌ СТАН: СВІТЛА НЕМАЄ\n\n"
                 f"🔌 Напруга в мережі: {voltage} В\n"
                 f"{time_info}\n\n"
                 f"💡 Відсутнє електропостачання"
             )
-            
+
         elif status.get("reason") == "cloud_disconnected":
             result = (
                 f"⚠️ СТАН: НЕМАЄ ПІДКЛЮЧЕННЯ ДО ХМАРИ\n\n"
                 f"{time_info}\n\n"
                 f"💡 Пристрій працює, але не підключений до Shelly Cloud"
             )
-            
+
         elif "connection_error" in str(status.get("reason", "")):
             reason = status.get("reason", "невідома помилка")
-            
             result = (
                 f"❌ ПОМИЛКА ПІДКЛЮЧЕННЯ\n\n"
                 f"ℹ️ {reason}\n\n"
                 f"💡 Перевірте з'єднання з Shelly Cloud"
             )
-            
+
         else:
             reason = status.get("reason", "невідома причина")
             result = (
@@ -364,23 +327,15 @@ class LightChecker:
                 f"ℹ️ {reason}\n\n"
                 f"💡 Спробуйте пізніше"
             )
-        
-        # Додаємо заголовок з поточним часом у відповідній часовій зоні
+
+        # Додаємо заголовок з поточним часом
         try:
             tz = ZoneInfo(TIMEZONE)
             current_time = datetime.now(tz).strftime("%d.%m.%Y %H:%M:%S")
         except Exception:
             current_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-        
-        # Додаємо інформацію про пристрій
-        device_name = status.get("device_name", "Пристрій")
-        mac = status.get("mac", "немає")
-        
-        
+
         final_result = f"📊 ПЕРЕВІРКА: {current_time}\n{result}"
-        
-        print(f"\n📤 [BOT] Відправляємо користувачу:")
-        print(final_result)
-        print(f"="*60 + "\n")
-        
+        logger.info("Перевірка завершена")
+
         return final_result

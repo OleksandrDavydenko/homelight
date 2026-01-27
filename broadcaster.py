@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL = 90  # seconds
 
 async def notify_subscribers(bot: Bot, message: str):
+    """Відправка повідомлення всім підписаним користувачам"""
     user_ids = get_all_subscribed_users()
     logger.info("notify_subscribers: retrieved %d subscribed users", len(user_ids))
     if not user_ids:
@@ -31,7 +32,6 @@ async def notify_subscribers(bot: Bot, message: str):
             await asyncio.sleep(0.05)  # small pause to avoid hitting rate limits
         except Exception as e:
             logger.exception("Failed to send message to %s: %s", user_id, e)
-#перевірити чи працює
 
 async def monitor_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
