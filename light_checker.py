@@ -418,9 +418,10 @@ class LightChecker:
         if status.get("online") is False:
             if status.get("reason") in ["no_devices_found", "no_devices_in_account"]:
                 result = (
-                    f"⚠️ СТАН: НЕМАЄ ПРИСТРОЇВ\n\n"
-                    f"ℹ️ Немає пристроїв у вашому обліковому записі Shelly Cloud\n\n"
-                    f"💡 Додайте пристрій до свого облікового запису на https://my.shelly.cloud"
+                    f"🔴 СТАН: НЕМАЄ СВІТЛА\n\n"
+                    f"⏱️ Час відключення: {offline_duration}\n"
+                    f"{time_info}\n\n"
+                    f"💡 Пристрій OFFLINE"
                 )
             else:
                 offline_since = status.get("last_update_time", 0)
@@ -522,10 +523,9 @@ class LightChecker:
         device_info = ""
         mac = status.get("mac")
         device_name = status.get("device_name")
-        if mac and device_name:
-            device_info = f"📱 {device_name} ({mac})\n\n"
 
-        final_result = f"📊 ПЕРЕВІРКА: {current_time}\n{device_info}{result}"
+
+        final_result = f"📊 ПЕРЕВІРКА: {current_time}\n"
         logger.info("Перевірка завершена")
 
         return final_result
