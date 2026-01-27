@@ -13,7 +13,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL = 88888  # seconds
+POLL_INTERVAL = 60  # seconds
 
 async def notify_subscribers(bot: Bot, message: str):
     """Відправка повідомлення всім підписаним користувачам"""
