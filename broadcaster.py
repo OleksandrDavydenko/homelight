@@ -36,36 +36,64 @@ async def notify_subscribers(bot: Bot, message: str):
 async def monitor_loop():
     bot = Bot(token=TELEGRAM_TOKEN)
     checker = LightChecker()
-    last_key = None
+    last_state = None
     iteration = 0
 
     logger.info("monitor_loop started")
+    # Завантажуємо попередній стан з файлу
+    saved_state = checker.load_state()
+    if saved_state:
+        last_state = saved_state
+        logger.info("Loaded saved state: %s", last_state)
+    
     while True:
         iteration += 1
         logger.info("=== Iteration %d ===", iteration)
         try:
-            # Отримуємо сирий статус без форматування (щоб порівнювати стабільні поля)
+            # Отримуємо сирий статус без форматування
             logger.info("Getting device status...")
             raw = await asyncio.to_thread(checker.get_real_device_status)
             logger.info("Raw status: %s", raw)
-            # Ключ, за яким будемо визначати зміну — has_light, online, reason
-            key = (raw.get("has_light"), raw.get("online"), raw.get("reason"))
-            logger.info("Status key: %s", key)
+            
+            # Поточний стан: key для порівняння + значення напруги
+            current_state = {
+                "has_light": raw.get("has_light"),
+                "online": raw.get("online"),
+                "reason": raw.get("reason"),
+                "voltage_status": raw.get("voltage_status"),
+                "voltage": raw.get("voltage")
+            }
+            logger.info("Current state: %s", current_state)
 
-            if last_key is None:
-                last_key = key
-                logger.info("Initial status key: %s", key)
-            elif key != last_key:
-                logger.warning("STATUS CHANGED: %s -> %s", last_key, key)
-                # Форматуємо повне повідомлення для відправки безпосередньо перед розсилкою
+            if last_state is None:
+                # Перший запуск - зберігаємо стан
+                last_state = current_state
+                logger.info("Initial state: %s", current_state)
+                checker.save_state(current_state)
+            elif (
+                current_state["has_light"] != last_state.get("has_light") or
+                current_state["online"] != last_state.get("online") or
+                current_state["reason"] != last_state.get("reason") or
+                current_state["voltage_status"] != last_state.get("voltage_status") or
+                current_state["voltage"] != last_state.get("voltage")
+            ):
+                # Стан змінився - надсилаємо повідомлення
+                logger.warning(
+                    "STATE CHANGED: %s -> %s",
+                    {k: v for k, v in last_state.items()},
+                    current_state
+                )
                 logger.info("Formatting full message...")
                 message = await asyncio.to_thread(checker.check_light_status)
                 logger.info("Calling notify_subscribers...")
                 await notify_subscribers(bot, message)
                 logger.info("notify_subscribers completed")
-                last_key = key
+                
+                # Оновлюємо збережений стан
+                checker.save_state(current_state)
+                last_state = current_state
             else:
-                logger.debug("No change in status")
+                logger.debug("No change in state")
         except Exception as e:
             logger.exception("Error while checking status: %s", e)
 
