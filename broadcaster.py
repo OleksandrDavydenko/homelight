@@ -88,7 +88,7 @@ async def monitor_loop():
                 logger.info("Formatted message: %s", message)
                 # ТИМЧАСОВО ДЕАКТИВОВАНО ДЛЯ НАЛАГОДЖЕННЯ
                 logger.info("SKIPPING notify_subscribers for debugging")
-                # await notify_subscribers(bot, message)
+                await notify_subscribers(bot, message)
                 logger.info("Would have sent notification")
                 
                 # Оновлюємо стан у пам'яті
