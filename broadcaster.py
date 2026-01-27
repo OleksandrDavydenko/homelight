@@ -13,7 +13,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-POLL_INTERVAL = 60  # seconds
+POLL_INTERVAL = 90  # seconds
 
 async def notify_subscribers(bot: Bot, message: str):
     user_ids = get_all_subscribed_users()

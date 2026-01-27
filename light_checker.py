@@ -120,17 +120,17 @@ class LightChecker:
         else:
             logger.info(f"Напруга менше {MIN_VOLTAGE}В ({voltage} V)")
             return False
+
+    def analyze_device_data(self, mac: str, device_data: dict):
         """Аналіз даних пристрою та визначення статусу світла"""
-        print(f"📊 [Shelly API] Аналіз даних для пристрою {mac}...")
+        logger.info(f"Аналіз даних для пристрою {mac}...")
         
         current_time = int(time.time())
-        
-        # Отримуємо системну інформацію
         sys_info = device_data.get('sys', {})
-        online = sys_info.get('mac') is not None  # Якщо є MAC, пристрій існує
-        
+        online = sys_info.get('mac') is not None
+
         if not online:
-            print(f"⚠️ [Shelly API] Пристрій {mac} не знайдено або OFFLINE")
+            logger.warning(f"Пристрій {mac} не знайдено або OFFLINE")
             return {
                 "has_light": False,
                 "online": False,
@@ -139,78 +139,27 @@ class LightChecker:
                 "last_update_time": current_time,
                 "mac": mac
             }
-        
+
         # Перевіряємо чи пристрій онлайн в хмарі
         cloud_connected = device_data.get('cloud', {}).get('connected', False)
         if not cloud_connected:
-            print(f"⚠️ [Shelly API] Пристрій {mac} не підключений до хмари")
+            logger.warning(f"Пристрій {mac} не підключений до хмари")
             return {
                 "has_light": None,
-                "online": True,  # Пристрій існує, але не в хмарі
+                "online": True,
                 "reason": "cloud_disconnected",
                 "device_name": f"Shelly Device {mac[-6:]}",
                 "last_update_time": sys_info.get('last_sync_ts', current_time),
                 "mac": mac
             }
-        
-        # Шукаємо switch пристрій для перевірки напруги
-        voltage = None
-        power = None
-        current_amp = None
-        frequency = None
-        switch_state = None
-        
-        # Шукаємо всі ключі, що починаються з 'switch'
-        for key, value in device_data.items():
-            if key.startswith('switch'):
-                print(f"🔌 [Shelly API] Знайдено {key}")
-                
-                if isinstance(value, dict):
-                    voltage = value.get('voltage')
-                    power = value.get('apower')
-                    current_amp = value.get('current')
-                    frequency = value.get('freq')
-                    switch_state = value.get('output')
-                    
-                    print(f"📊 [Shelly API] Напруга: {voltage} V")
-                    print(f"📊 [Shelly API] Потужність: {power} W")
-                    print(f"📊 [Shelly API] Струм: {current_amp} A")
-                    print(f"📊 [Shelly API] Частота: {frequency} Hz")
-                    print(f"📊 [Shelly API] Стан виходу: {'ON' if switch_state else 'OFF'}")
-                    break
-        
-        # Визначаємо, чи є світло
-        has_light = False
-        
-        if voltage is not None:
-            if voltage > 100:  # Якщо напруга більше 100В
-                print(f"✅ [Shelly API] Напруга більше 100В ({voltage} V)")
-                if power is not None and power > 0:
-                    # Є напруга і споживання - точно є світло
-                    has_light = True
-                    print(f"✅ [Shelly API] Є споживання: {power} W - світло Є")
-                elif current_amp is not None and current_amp > 0:
-                    # Є напруга і струм - точно є світло
-                    has_light = True
-                    print(f"✅ [Shelly API] Є струм: {current_amp} A - світло Є")
-                else:
-                    # Є напруга, але немає споживання
-                    print(f"⚠️ [Shelly API] Напруга є, але немає споживання")
-                    has_light = True  # Напруга є - припускаємо що світло є
-            else:
-                # Напруги немає або вона дуже низька
-                print(f"❌ [Shelly API] Напруга менше 100В ({voltage} V) - світла НЕМАЄ")
-                has_light = False
-        else:
-            # Не вдалося отримати напругу
-            print(f"⚠️ [Shelly API] Не вдалося отримати напругу")
-            has_light = None
-        
-        # Отримуємо назву пристрою
+
+        # Витягуємо дані про switch
+        voltage, power, current_amp, frequency, switch_state = self._extract_switch_data(device_data)
+        has_light = self._determine_has_light(voltage, power, current_amp)
+
         device_name = f"Shelly {device_data.get('code', 'Device')} ({mac[-6:]})"
-        
-        print(f"📊 [Shelly API] Підсумок: світло {'Є' if has_light else 'Немає' if has_light is False else 'Невідомо'}")
-        
+        logger.info(f"Підсумок: світло {'Є' if has_light else 'Немає' if has_light is False else 'Невідомо'}")
+
         return {
             "has_light": has_light,
             "online": True,
@@ -228,30 +177,20 @@ class LightChecker:
     
     def get_real_device_status(self):
         """Отримання реального статусу пристрою з Shelly Cloud"""
-        print(f"🔧 [Shelly API] Початок перевірки")
-        print(f"🔧 [Shelly API] Base URL: {self.base_url}")
-        print(f"🔧 [Shelly API] Target MAC: {self.target_mac if self.target_mac else 'автоматичний вибір'}")
-        
+        logger.info("Початок перевірки")
+        logger.debug(f"Base URL: {self.base_url}, Target MAC: {self.target_mac or 'автоматичний вибір'}")
+
         try:
-            # Отримуємо дані з Shelly Cloud
             devices_status = self.fetch_all_status()
-            
-            # Обираємо пристрій
             mac, device_data = self.pick_device(devices_status)
-            
-            print(f"✅ [Shelly API] Обрано пристрій: {mac}")
-            
-            # Аналізуємо дані
+            logger.info(f"Обрано пристрій: {mac}")
             return self.analyze_device_data(mac, device_data)
-            
+
         except Exception as e:
-            print(f"💥 [Shelly API] Виняток: {type(e).__name__}: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            
+            logger.exception(f"Виняток: {type(e).__name__}: {str(e)}")
             return {
-                "has_light": None, 
-                "online": None, 
+                "has_light": None,
+                "online": None,
                 "reason": f"connection_error: {str(e)}",
                 "last_update_time": int(time.time())
             }
