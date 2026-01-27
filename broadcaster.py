@@ -73,8 +73,7 @@ async def monitor_loop():
                 current_state["has_light"] != last_state.get("has_light") or
                 current_state["online"] != last_state.get("online") or
                 current_state["reason"] != last_state.get("reason") or
-                current_state["voltage_status"] != last_state.get("voltage_status") or
-                current_state["voltage"] != last_state.get("voltage")
+                current_state["voltage_status"] != last_state.get("voltage_status")
             ):
                 # Деталізований лог для налагодження
                 logger.warning("STATE CHANGE DETECTED:")
