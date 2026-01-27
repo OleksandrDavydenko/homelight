@@ -392,9 +392,9 @@ class LightChecker:
         # Додаємо інформацію про пристрій
         device_name = status.get("device_name", "Пристрій")
         mac = status.get("mac", "немає")
-        device_header = f"📱 {device_name} ({mac})\n"
         
-        final_result = f"📊 ПЕРЕВІРКА: {current_time}\n{device_header}\n{result}"
+        
+        final_result = f"📊 ПЕРЕВІРКА: {current_time}\n{result}"
         
         print(f"\n📤 [BOT] Відправляємо користувачу:")
         print(final_result)
