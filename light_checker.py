@@ -18,7 +18,7 @@ INITIAL_RETRY_DELAY = 2  # сек
 MAX_RETRY_DELAY = 30  # сек
 REQUEST_TIMEOUT = 15  # сек
 POLL_INTERVAL = 60  # сек
-STATE_FILE = "device_state.json"  # Файл для збереження стану
+STATE_FILE = "/tmp/homelight_state.json"  # Файл для збереження стану (використовуємо /tmp для Heroku)
 
 
 class LightChecker:
