@@ -1,9 +1,19 @@
 import requests
 import time
-import json
+import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from config import SHELLY_AUTH_KEY, SHELLY_BASE_URL, TARGET_MAC, TIMEZONE
+
+logger = logging.getLogger(__name__)
+
+# Константи для перевірки напруги
+MIN_VOLTAGE = 100  # В
+MAX_RETRY_ATTEMPTS = 5
+INITIAL_RETRY_DELAY = 2  # сек
+MAX_RETRY_DELAY = 30  # сек
+REQUEST_TIMEOUT = 15  # сек
+POLL_INTERVAL = 60  # сек
 
 class LightChecker:
     def __init__(self):
@@ -11,71 +21,105 @@ class LightChecker:
         self.base_url = SHELLY_BASE_URL
         self.target_mac = TARGET_MAC
         
-    def fetch_all_status(self, max_retries=5):
+    def fetch_all_status(self, max_retries=MAX_RETRY_ATTEMPTS):
         """Отримання статусу всіх пристроїв з Shelly Cloud"""
         url = f"{self.base_url}/device/all_status"
         payload = {"auth_key": self.auth_key}
 
-        delay = 2
+        delay = INITIAL_RETRY_DELAY
         for attempt in range(1, max_retries + 1):
             try:
-                print(f"📡 [Shelly API] Спроба {attempt}/{max_retries} отримати дані...")
-                r = requests.post(url, data=payload, timeout=15)
+                logger.info(f"Спроба {attempt}/{max_retries} отримати дані з Shelly API...")
+                r = requests.post(url, data=payload, timeout=REQUEST_TIMEOUT)
 
                 if r.status_code == 429:
-                    print(f"⚠️ [Shelly API] 429 Too many requests. Чекаю {delay}s...")
+                    logger.warning(f"429 Too many requests. Чекаю {delay}s...")
                     time.sleep(delay)
-                    delay = min(delay * 2, 30)
+                    delay = min(delay * 2, MAX_RETRY_DELAY)
                     continue
 
                 if r.status_code != 200:
-                    print(f"❌ [Shelly API] HTTP помилка: {r.status_code}")
-                    print(f"❌ [Shelly API] Тіло відповіді: {r.text[:300]}")
+                    logger.error(f"HTTP помилка: {r.status_code}, тіло: {r.text[:300]}")
                     r.raise_for_status()
 
                 j = r.json()
                 if not j.get("isok"):
-                    raise RuntimeError(f"❌ [Shelly API] API помилка: {j}")
+                    raise RuntimeError(f"Shelly API помилка: {j}")
 
-                print(f"✅ [Shelly API] Дані успішно отримано")
+                logger.info("Дані з Shelly API успішно отримано")
                 return j["data"]["devices_status"]
 
             except requests.exceptions.RequestException as e:
-                print(f"❌ [Shelly API] Помилка запиту: {e}")
+                logger.error(f"Помилка запиту: {e}")
                 if attempt < max_retries:
-                    print(f"🔄 [Shelly API] Повторна спроба через {delay} сек...")
+                    logger.info(f"Повторна спроба через {delay} сек...")
                     time.sleep(delay)
-                    delay = min(delay * 2, 30)
+                    delay = min(delay * 2, MAX_RETRY_DELAY)
                 else:
                     raise RuntimeError(f"Не вдалося отримати дані після {max_retries} спроб")
 
-        raise RuntimeError("Не вдалося отримати дані: постійний 429 (rate limit). Спробуйте через 1-2 хвилини.")
+        raise RuntimeError("Помилка: постійний 429 (rate limit). Спробуйте через 1-2 хвилини.")
 
     def pick_device(self, devices_status: dict):
         """Вибір цільового пристрою"""
         if not devices_status:
-            raise RuntimeError("❌ [Shelly API] devices_status порожній")
+            raise RuntimeError("devices_status порожній")
 
         # Якщо вказано конкретний MAC
         if self.target_mac:
-            mac_lower = self.target_mac.lower()
-            mac_upper = self.target_mac.upper()
-            
-            # Шукаємо в різних форматах
-            for mac in [mac_lower, mac_upper, self.target_mac]:
+            for mac in [self.target_mac.lower(), self.target_mac.upper(), self.target_mac]:
                 if mac in devices_status:
-                    print(f"✅ [Shelly API] Знайдено цільовий пристрій: {mac}")
+                    logger.info(f"Знайдено цільовий пристрій: {mac}")
                     return mac, devices_status[mac]
             
-            print(f"⚠️ [Shelly API] Не знайдено пристрій з MAC: {self.target_mac}")
-            print(f"⚠️ [Shelly API] Доступні пристрої: {list(devices_status.keys())}")
+            logger.warning(f"Не знайдено пристрій з MAC: {self.target_mac}")
+            logger.info(f"Доступні пристрої: {list(devices_status.keys())}")
         
         # Беремо перший пристрій
         first_mac = next(iter(devices_status.keys()))
-        print(f"⚠️ [Shelly API] Використовується перший пристрій: {first_mac}")
+        logger.info(f"Використовується перший пристрій: {first_mac}")
         return first_mac, devices_status[first_mac]
 
-    def analyze_device_data(self, mac: str, device_data: dict):
+    def _extract_switch_data(self, device_data: dict) -> tuple:
+        """Витяг даних про напругу, потужність та інше зі switch пристрою"""
+        voltage = None
+        power = None
+        current_amp = None
+        frequency = None
+        switch_state = None
+        
+        for key, value in device_data.items():
+            if key.startswith('switch') and isinstance(value, dict):
+                logger.debug(f"Знайдено {key}")
+                voltage = value.get('voltage')
+                power = value.get('apower')
+                current_amp = value.get('current')
+                frequency = value.get('freq')
+                switch_state = value.get('output')
+                break
+        
+        return voltage, power, current_amp, frequency, switch_state
+    
+    def _determine_has_light(self, voltage, power, current_amp) -> bool | None:
+        """Визначення наявності світла на основі параметрів"""
+        if voltage is None:
+            logger.warning("Не вдалося отримати напругу")
+            return None
+        
+        if voltage > MIN_VOLTAGE:
+            logger.info(f"Напруга більше {MIN_VOLTAGE}В ({voltage} V)")
+            if power and power > 0:
+                logger.info(f"Є споживання: {power} W")
+                return True
+            elif current_amp and current_amp > 0:
+                logger.info(f"Є струм: {current_amp} A")
+                return True
+            else:
+                logger.warning("Напруга є, але немає споживання/струму")
+                return True
+        else:
+            logger.info(f"Напруга менше {MIN_VOLTAGE}В ({voltage} V)")
+            return False
         """Аналіз даних пристрою та визначення статусу світла"""
         print(f"📊 [Shelly API] Аналіз даних для пристрою {mac}...")
         
