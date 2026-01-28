@@ -373,3 +373,15 @@ class LightChecker:
         
         # Якщо стан не змінився
         return None
+    
+
+    # Додайте це в кінець light_checker.py для зворотної сумісності
+_current_state = None
+
+def get_current_state() -> dict | None:
+    """Отримати поточний стан (для зворотної сумісності)"""
+    return None  # Повертаємо None, оскільки більше не відстежуємо стан
+
+def set_current_state(state: dict) -> None:
+    """Зберегти поточний стан (для зворотної сумісності)"""
+    pass  # Нічого не робимо
