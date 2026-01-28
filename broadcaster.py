@@ -20,8 +20,8 @@ POLL_INTERVAL = 90  # seconds
 async def notify_subscribers(bot: Bot, message: str):
     """Відправка повідомлення всім підписаним користувачам"""
 
-    user_ids=[203148640]
-    #user_ids = get_all_subscribed_users()
+    #user_ids=[203148640]
+    user_ids = get_all_subscribed_users()
     logger.info("Sending notification to %d users", len(user_ids))
     
     for user_id in user_ids:
