@@ -598,8 +598,10 @@ class LightChecker:
                         details = f"🔌 Напруга: {voltage_display} (в нормі)\n〰️ Частота: {frequency_display}{time_details}"
                         return f"📈 Стан мережі | {formatted_time}\n──────────────\n{details}\n✅ Світло є. Параметри стабільні.{outage_recovery_info}"
                     else:
-                        # Якщо є проблеми з напругою, не відправляємо рутинне повідомлення
-                        return ""
+                        # Якщо є проблеми з напругою, повертаємо мінімальне повідомлення
+                        details = f"🔌 Напруга: {voltage_display}\n〰️ Частота: {frequency_display}{time_details}"
+                        status_note = "⚠️ Увага: напруга поза нормальним діапазоном" if voltage_status != "unknown" else ""
+                        return f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ: {formatted_time}\n\n✅ СВІТЛО Є {status_note}\n\n{details}{outage_recovery_info}"
                 
                 # ===== АВТОМАТИЧНИЙ АЛЕРТ (зміна стану) =====
                 else:
@@ -657,7 +659,7 @@ class LightChecker:
                         return f"✅ СВІТЛО ВІДНОВЛЕНО\n──────────────\n{details}{outage_recovery_info}"
                     else:
                         # Немає змін статусу - нічого не відправляємо
-                        # Але для ручної перевірки ми сюди не потрапляємо
+                        # Але для автоматичних алертів це нормально
                         return ""
             
             # ===== 3. НЕСПОДІВАНА СИТУАЦІЯ =====
@@ -668,7 +670,6 @@ class LightChecker:
         except Exception as e:
             logger.error(f"Помилка в check_light_status: {e}")
             return f"❌ ПОМИЛКА ПРИ ПЕРЕВІРЦІ: {str(e)}"
-
     # Допоміжний метод для перевірки з різними типами повідомлень
     def check_light(self, is_routine: bool = False) -> str:
         """Метод для зовнішнього виклику з вказівкою типу перевірки"""
