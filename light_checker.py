@@ -272,15 +272,6 @@ class LightChecker:
         frequency = status.get("frequency")
         has_light = status.get("has_light")
 
-        # Отримуємо поточний час для заголовка
-        try:
-            tz = ZoneInfo(TIMEZONE)
-            check_time = datetime.now(tz).strftime("%d.%m.%Y %H:%M:%S")
-        except Exception:
-            check_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-
-        # Формуємо заголовок
-        header = f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ: {check_time}\n\n"
 
         # Отримуємо поточний час
         current_time = int(time.time())
@@ -313,7 +304,7 @@ class LightChecker:
                 # Скидаємо час початку відключення
                 set_outage_start_time(None)
             
-            result = f"{header}✅ СВІТЛО Є\n\n{details}{outage_duration_info}"
+            result = f"✅ СВІТЛО Є\n\n{details}{outage_duration_info}"
                 
         else:
             # Світла НЕМАЄ
@@ -331,9 +322,9 @@ class LightChecker:
             
             # Формуємо повідомлення
             if time_info:
-                result = f"{header}❌ СВІТЛА НЕМАЄ\n\n{outage_duration_info}{time_info}"
+                result = f"❌ СВІТЛА НЕМАЄ\n\n{outage_duration_info}{time_info}"
             else:
-                result = f"{header}❌ СВІТЛА НЕМАЄ\n\n{outage_duration_info}".strip()
+                result = f"❌ СВІТЛА НЕМАЄ\n\n{outage_duration_info}".strip()
 
         return result
 
