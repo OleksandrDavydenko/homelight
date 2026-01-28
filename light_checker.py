@@ -17,8 +17,9 @@ MAX_RETRY_DELAY = 30  # сек
 REQUEST_TIMEOUT = 15  # сек
 OUTAGE_START_FILE = "/tmp/homelight_outage_start.json"
 
-# Глобальний стан
+# Глобальний стан для зворотної сумісності
 _outage_start_time = None
+_current_state = {}  # Для get_current_state/set_current_state
 
 
 def get_outage_start_time() -> int | None:
@@ -64,6 +65,19 @@ def save_outage_start_time(timestamp: int | None) -> None:
         logger.debug(f"Час початку відключення збережено: {timestamp}")
     except Exception as e:
         logger.exception(f"Помилка при збереженні часу відключення: {e}")
+
+
+# Функції для зворотної сумісності з broadcaster.py
+def get_current_state() -> dict:
+    """Отримати поточний стан (для зворотної сумісності)"""
+    global _current_state
+    return _current_state
+
+
+def set_current_state(state: dict) -> None:
+    """Зберегти поточний стан (для зворотної сумісності)"""
+    global _current_state
+    _current_state = state
 
 
 class LightChecker:
@@ -201,6 +215,11 @@ class LightChecker:
                 "last_update_time": int(time.time())
             }
 
+    # Метод для зворотної сумісності з broadcaster.py
+    def get_real_device_status(self):
+        """Альтернативна назва для get_device_status (для зворотної сумісності)"""
+        return self.get_device_status()
+
     def get_last_update_time(self, timestamp: int) -> str:
         """Отримує час останнього оновлення"""
         if not timestamp or timestamp == 0:
@@ -271,7 +290,6 @@ class LightChecker:
         voltage = status.get("voltage")
         frequency = status.get("frequency")
         has_light = status.get("has_light")
-
 
         # Отримуємо поточний час
         current_time = int(time.time())
@@ -364,17 +382,3 @@ class LightChecker:
         
         # Якщо стан не змінився
         return None
-    
-
-    # Додайте це в кінець light_checker.py для зворотної сумісності
-_current_state = {}
-
-def get_current_state() -> dict:
-    """Отримати поточний стан (для зворотної сумісності)"""
-    global _current_state
-    return _current_state
-
-def set_current_state(state: dict) -> None:
-    """Зберегти поточний стан (для зворотної сумісності)"""
-    global _current_state
-    _current_state = state
