@@ -20,6 +20,7 @@ OUTAGE_START_FILE = "/tmp/homelight_outage_start.json"
 # Глобальний стан для зворотної сумісності
 _outage_start_time = None
 _current_state = {}  # Для get_current_state/set_current_state
+_last_alert_sent = False  # Додаємо прапорець для відстеження вже відправленого алерту
 
 
 def get_outage_start_time() -> int | None:
@@ -32,9 +33,14 @@ def get_outage_start_time() -> int | None:
 
 def set_outage_start_time(timestamp: int | None) -> None:
     """Встановити час початку відключення"""
-    global _outage_start_time
+    global _outage_start_time, _last_alert_sent
     _outage_start_time = timestamp
     save_outage_start_time(timestamp)
+    
+    # Скидаємо прапорець алерту при зміні стану відключення
+    if timestamp is None:
+        _last_alert_sent = False
+    
     if timestamp:
         logger.info(f"Час початку відключення встановлено: {timestamp}")
     else:
@@ -349,7 +355,9 @@ class LightChecker:
     def check_for_alerts(self) -> str | None:
         """
         Перевіряє статус світла та повертає повідомлення тільки при зміні стану.
-        Повертає None якщо стан не змінився.
+        Повертає повідомлення лише двічі:
+        1. Коли світло пропало (перший раз)
+        2. Коли світло повернулося
         """
         logger.info("Перевірка для алертів")
 
@@ -360,6 +368,9 @@ class LightChecker:
         current_time = int(time.time())
         outage_start = get_outage_start_time()
         
+        # Додаємо глобальну змінну для відстеження вже відправленого алерту
+        global _last_alert_sent
+        
         # Перевіряємо зміну стану
         if has_light:
             # Світло Є
@@ -368,8 +379,9 @@ class LightChecker:
                 outage_duration = current_time - outage_start
                 duration_str = self.format_duration(outage_duration)
                 
-                # Скидаємо час початку відключення
+                # Скидаємо час початку відключення та прапорець
                 set_outage_start_time(None)
+                _last_alert_sent = False
                 
                 return f"🟢 СВІТЛО ПОВЕРНУЛОСЬ!\n\n⏱️ Час відключення: {duration_str}"
         
@@ -378,7 +390,12 @@ class LightChecker:
             if outage_start is None:
                 # Перший раз, коли світло пропало
                 set_outage_start_time(current_time)
+                _last_alert_sent = True  # Встановлюємо, що алерт вже відправлено
+                return "🔴 СВІТЛО ПРОПАЛО!"
+            elif not _last_alert_sent:
+                # Цей блок більше не викликається, лишаємо для зворотної сумісності
+                _last_alert_sent = True
                 return "🔴 СВІТЛО ПРОПАЛО!"
         
-        # Якщо стан не змінився
+        # Якщо стан не змінився - НЕ відправляємо повторних повідомлень
         return None
