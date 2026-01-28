@@ -18,34 +18,30 @@ INITIAL_RETRY_DELAY = 2  # сек
 MAX_RETRY_DELAY = 30  # сек
 REQUEST_TIMEOUT = 15  # сек
 STATE_FILE = "/tmp/homelight_state.json"
-OUTAGE_START_FILE = "/tmp/homelight_outage_start.json"  # Файл для зберігання часу початку відключення
-VOLTAGE_STATE_FILE = "/tmp/homelight_voltage_state.json"  # Файл для зберігання попереднього стану напруги
+OUTAGE_START_FILE = "/tmp/homelight_outage_start.json"
+VOLTAGE_STATE_FILE = "/tmp/homelight_voltage_state.json"
 
-# Глобальний стан для зберігання протягом роботи dyno
+# Глобальний стан
 _current_state = None
 _outage_start_time = None
 _previous_voltage_state = None
 
 def get_current_state() -> dict | None:
-    """Отримати поточний стан зі змінної"""
     global _current_state
     return _current_state
 
 def set_current_state(state: dict) -> None:
-    """Зберегти поточний стан у змінну"""
     global _current_state
     _current_state = state
     logger.debug(f"Стан оновлено в пам'яті: {state}")
 
 def get_outage_start_time() -> int | None:
-    """Отримати час початку відключення"""
     global _outage_start_time
     if _outage_start_time is None:
         _outage_start_time = load_outage_start_time()
     return _outage_start_time
 
 def set_outage_start_time(timestamp: int | None) -> None:
-    """Встановити час початку відключення"""
     global _outage_start_time
     _outage_start_time = timestamp
     save_outage_start_time(timestamp)
@@ -55,21 +51,18 @@ def set_outage_start_time(timestamp: int | None) -> None:
         logger.info("Час початку відключення скинуто")
 
 def get_previous_voltage_state() -> str | None:
-    """Отримати попередній стан напруги"""
     global _previous_voltage_state
     if _previous_voltage_state is None:
         _previous_voltage_state = load_voltage_state()
     return _previous_voltage_state
 
 def set_previous_voltage_state(state: str) -> None:
-    """Зберегти стан напруги"""
     global _previous_voltage_state
     _previous_voltage_state = state
     save_voltage_state(state)
     logger.debug(f"Стан напруги збережено: {state}")
 
 def load_outage_start_time() -> int | None:
-    """Завантажити час початку відключення з файлу"""
     try:
         if os.path.exists(OUTAGE_START_FILE):
             with open(OUTAGE_START_FILE, 'r', encoding='utf-8') as f:
@@ -83,7 +76,6 @@ def load_outage_start_time() -> int | None:
     return None
 
 def save_outage_start_time(timestamp: int | None) -> None:
-    """Зберегти час початку відключення у файл"""
     try:
         data = {"outage_start": timestamp}
         with open(OUTAGE_START_FILE, 'w', encoding='utf-8') as f:
@@ -93,7 +85,6 @@ def save_outage_start_time(timestamp: int | None) -> None:
         logger.exception(f"Помилка при збереженні часу відключення: {e}")
 
 def load_voltage_state() -> str | None:
-    """Завантажити стан напруги з файлу"""
     try:
         if os.path.exists(VOLTAGE_STATE_FILE):
             with open(VOLTAGE_STATE_FILE, 'r', encoding='utf-8') as f:
@@ -107,7 +98,6 @@ def load_voltage_state() -> str | None:
     return None
 
 def save_voltage_state(state: str) -> None:
-    """Зберегти стан напруги у файл"""
     try:
         data = {"voltage_state": state}
         with open(VOLTAGE_STATE_FILE, 'w', encoding='utf-8') as f:
@@ -124,7 +114,6 @@ class LightChecker:
         self.target_mac = TARGET_MAC
 
     def fetch_all_status(self, max_retries=MAX_RETRY_ATTEMPTS):
-        """Отримання статусу всіх пристроїв з Shelly Cloud"""
         url = f"{self.base_url}/device/all_status"
         payload = {"auth_key": self.auth_key}
 
@@ -170,13 +159,11 @@ class LightChecker:
         raise RuntimeError("Помилка: постійний 429 (rate limit). Спробуйте через 1-2 хвилини.")
 
     def pick_device(self, data: dict):
-        """Вибір цільового пристрою з отриманих даних"""
         devices_status = data.get("devices_status", {})
         
         if not devices_status:
             raise RuntimeError("devices_status порожній")
 
-        # Якщо вказано конкретний MAC
         if self.target_mac:
             for mac in [self.target_mac.lower(), self.target_mac.upper(), self.target_mac]:
                 if mac in devices_status:
@@ -185,13 +172,11 @@ class LightChecker:
 
             logger.warning(f"Не знайдено пристрій з MAC: {self.target_mac}")
 
-        # Беремо перший пристрій
         first_mac = next(iter(devices_status.keys()))
         logger.info(f"Використовується пристрій: {first_mac}")
         return first_mac, devices_status[first_mac]
 
     def _extract_switch_data(self, device_data: dict) -> tuple:
-        """Витяг даних про напругу, потужність та інше зі switch пристрою"""
         voltage = None
         power = None
         current_amp = None
@@ -211,7 +196,6 @@ class LightChecker:
         return voltage, power, current_amp, frequency, switch_state
 
     def _determine_has_light(self, voltage, power, current_amp) -> bool | None:
-        """Визначення наявності світла на основі параметрів"""
         if voltage is None:
             logger.warning("Не вдалося отримати напругу")
             return None
@@ -224,7 +208,6 @@ class LightChecker:
             return False
 
     def _determine_voltage_status(self, voltage) -> str:
-        """Визначення статусу напруги: normal, low, high"""
         if voltage is None:
             return "unknown"
 
@@ -239,7 +222,6 @@ class LightChecker:
             return "normal"
 
     def analyze_device_data(self, mac: str, device_data: dict):
-        """Аналіз даних пристрою та визначення статусу світла"""
         logger.info(f"Аналіз даних для пристрою {mac}...")
 
         current_time = int(time.time())
@@ -258,7 +240,6 @@ class LightChecker:
                 "mac": mac
             }
 
-        # Витягуємо дані про switch
         voltage, power, current_amp, frequency, switch_state = self._extract_switch_data(device_data)
         has_light = self._determine_has_light(voltage, power, current_amp)
         voltage_status = self._determine_voltage_status(voltage)
@@ -279,14 +260,11 @@ class LightChecker:
         }
 
     def get_real_device_status(self):
-        """Отримання реального статусу пристрою з Shelly Cloud"""
         logger.info("Початок перевірки")
 
         try:
-            # Отримуємо всі дані
             data = self.fetch_all_status()
             
-            # Перевіряємо, чи є devices_status у даних
             if "devices_status" not in data:
                 logger.error(f"В даних відсутній ключ 'devices_status'. Отримані ключі: {list(data.keys())}")
                 
@@ -301,7 +279,6 @@ class LightChecker:
                         "last_update_time": int(time.time())
                     }
                 
-                # Якщо немає пристроїв
                 return {
                     "has_light": False,
                     "online": False,
@@ -311,7 +288,6 @@ class LightChecker:
                     "last_update_time": int(time.time())
                 }
             
-            # Вибираємо пристрій
             mac, device_data = self.pick_device(data)
             logger.info(f"Обрано пристрій: {mac}")
             return self.analyze_device_data(mac, device_data)
@@ -341,7 +317,6 @@ class LightChecker:
             }
 
     def get_last_update_time(self, timestamp: int) -> str:
-        """Отримує час останнього оновлення"""
         if not timestamp or timestamp == 0:
             return ""
 
@@ -357,7 +332,6 @@ class LightChecker:
         diff = now_dt - dt_local
         diff_seconds = int(diff.total_seconds())
 
-        # Форматуємо дату
         if dt_local.date() == now_dt.date():
             time_str = dt_local.strftime("сьогодні о %H:%M")
         elif dt_local.date() == (now_dt - timedelta(days=1)).date():
@@ -365,7 +339,6 @@ class LightChecker:
         else:
             time_str = dt_local.strftime("%d.%m о %H:%M")
 
-        # Додаємо скільки часу тому
         if diff_seconds < 60:
             ago = "щойно"
         elif diff_seconds < 3600:
@@ -382,7 +355,6 @@ class LightChecker:
         return f"🕒 {time_str} ({ago})"
 
     def format_duration(self, seconds: int) -> str:
-        """Форматує тривалість у зрозумілий формат"""
         if seconds < 60:
             return f"{seconds} секунд"
         elif seconds < 3600:
@@ -398,8 +370,8 @@ class LightChecker:
             hours = (seconds % 86400) // 3600
             return f"{days} дн {hours} год"
 
-    def check_voltage_change(self, voltage_status: str) -> str | None:
-        """Перевіряє зміну стану напруги та повертає повідомлення про зміну"""
+    def check_voltage_change(self, voltage_status: str, voltage_value: float) -> str | None:
+        """Перевіряє зміну стану напруги та повертає повідомлення"""
         previous_state = get_previous_voltage_state()
         current_state = voltage_status
         
@@ -410,11 +382,11 @@ class LightChecker:
             
             # Формуємо повідомлення про зміну напруги
             if current_state == "low":
-                return "⚠️ УВАГА! Зміна стану напруги: низька напруга (< 200В)"
+                return f"⚠️ УВАГА! Низька напруга: {voltage_value:.1f} В\n(норма: 200-240 В)"
             elif current_state == "high":
-                return "⚠️ УВАГА! Зміна стану напруги: висока напруга (> 240В)"
+                return f"⚠️ УВАГА! Висока напруга: {voltage_value:.1f} В\n(норма: 200-240 В)"
             elif current_state == "normal":
-                return "✅ Напруга повернулася до нормального рівня (200-240В)"
+                return f"✅ Напруга в нормі: {voltage_value:.1f} В"
             elif current_state == "unknown":
                 return "❓ Стан напруги невідомий"
         
@@ -425,118 +397,100 @@ class LightChecker:
         return None
 
     def check_light_status(self) -> str:
-        """Основна функція для перевірки статусу світла (залишається без змін)"""
+        """Основна функція для перевірки статусу світла (для кнопки check)"""
         logger.info("Початок перевірки світла")
 
         status = self.get_real_device_status()
         last_update_time = status.get("last_update_time", 0)
         time_info = self.get_last_update_time(last_update_time)
 
-        # Отримуємо дані
         voltage = status.get("voltage")
         frequency = status.get("frequency")
         voltage_status = status.get("voltage_status", "unknown")
         has_light = status.get("has_light")
         online = status.get("online")
 
-        # Отримуємо поточний час для заголовка
         try:
             tz = ZoneInfo(TIMEZONE)
             check_time = datetime.now(tz).strftime("%d.%m.%Y %H:%M:%S")
         except Exception:
             check_time = datetime.now().strftime("%d.%m.%Y %H:%M:%S")
 
-        # Формуємо заголовок
         header = f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ: {check_time}\n\n"
 
-        # Отримуємо поточний час
         current_time = int(time.time())
-        
-        # Отримуємо час початку відключення
         outage_start = get_outage_start_time()
         
-        # Логіка для відстеження відключення
         if not online or has_light is False:
-            # Світла немає
             if outage_start is None:
-                # Встановлюємо час початку відключення (перший раз)
                 set_outage_start_time(current_time)
                 outage_duration_info = ""
             else:
-                # Розраховуємо тривалість відключення
                 outage_duration = current_time - outage_start
                 duration_str = self.format_duration(outage_duration)
                 outage_duration_info = f"⏱️ Час відключення: {duration_str}\n"
             
-            # Формуємо повідомлення
             if time_info:
                 result = f"{header}❌ СВІТЛА НЕМАЄ\n\n{outage_duration_info}{time_info}"
             else:
                 result = f"{header}❌ СВІТЛА НЕМАЄ\n\n{outage_duration_info}".strip()
                 
         elif has_light is True:
-            # Світло є
             voltage_display = f"{voltage:.1f} В" if voltage is not None else "–"
             frequency_display = f"{frequency:.1f} Гц" if frequency is not None else "–"
             
             details = f"🔌 Напруга: {voltage_display}\n〰️  Частота: {frequency_display}"
             
-            # Додаємо інформацію про час
             if time_info:
                 details += f"\n{time_info}"
             
-            # Додаємо інформацію про тривалість відключення, якщо воно було
             outage_duration_info = ""
             if outage_start:
                 outage_duration = current_time - outage_start
-                if outage_duration > 60:  # Якщо відключення було більше 1 хвилини
+                if outage_duration > 60:
                     duration_str = self.format_duration(outage_duration)
                     outage_duration_info = f"\n\n💡 Світла не було: {duration_str}"
                 
-                # Скидаємо час початку відключення
                 set_outage_start_time(None)
             
             result = f"{header}✅ СВІТЛО Є\n\n{details}{outage_duration_info}"
             
-            # Додаємо попередження про напругу
             if voltage_status == "low" and voltage is not None:
                 result += f"\n\n⚠️ УВАГА! Низька напруга ({voltage:.0f} В)"
             elif voltage_status == "high" and voltage is not None:
                 result += f"\n\n⚠️ УВАГА! Висока напруга ({voltage:.0f} В)"
                 
         else:
-            # Невідомий стан
             result = f"{header}❓ СТАН НЕВІДОМИЙ"
 
         return result
 
-    def check_light_status_with_alerts(self) -> tuple:
+    def check_status_with_alerts(self) -> tuple:
         """
-        Перевіряє статус світла та повертає кортеж:
-        (основне_повідомлення, повідомлення_про_зміну_напруги, повідомлення_про_відключення)
+        Перевіряє статус та повертає кортеж:
+        (основне_повідомлення, повідомлення_про_напругу, повідомлення_про_світло)
+        
+        Примітка: основне повідомлення використовується тільки для кнопки check,
+        для автоматичних перевірок відправляємо тільки алерти
         """
-        logger.info("Початок перевірки світла з оповіщеннями")
+        logger.info("Перевірка статусу з алертами")
 
         status = self.get_real_device_status()
         
-        # Отримуємо дані
         voltage = status.get("voltage")
         voltage_status = status.get("voltage_status", "unknown")
         has_light = status.get("has_light")
         online = status.get("online")
         
-        # Отримуємо поточний час
         current_time = int(time.time())
-        
-        # Отримуємо час початку відключення
         outage_start = get_outage_start_time()
         
         # Змінні для повідомлень
-        voltage_change_alert = None
-        power_outage_alert = None
+        voltage_alert = None
+        light_alert = None
         
-        # 1. Перевіряємо зміну напруги
-        voltage_change_alert = self.check_voltage_change(voltage_status)
+        # 1. Перевіряємо зміну напруги (відправляємо алерт ТІЛЬКИ при зміні стану)
+        voltage_alert = self.check_voltage_change(voltage_status, voltage)
         
         # 2. Перевіряємо зміну стану світла
         if not online or has_light is False:
@@ -544,36 +498,56 @@ class LightChecker:
             if outage_start is None:
                 # Перший раз, коли світло пропало
                 set_outage_start_time(current_time)
-                power_outage_alert = "🔴 СВІТЛО ПРОПАЛО!"
-            # Якщо світло вже було відсутнє, не створюємо повторних повідомлень
+                light_alert = "🔴 СВІТЛО ПРОПАЛО!"
                 
+                # Якщо пристрій offline, додаємо тривалість
+                if not online:
+                    duration = 1  # Починаємо відлік
+                    duration_str = self.format_duration(duration)
+                    light_alert += f"\n\n⏱️ Час відключення: {duration_str}"
+            
+            else:
+                # Світло вже відсутнє - оновлюємо повідомлення про тривалість
+                outage_duration = current_time - outage_start
+                if outage_duration % 300 == 0:  # Кожні 5 хвилин
+                    duration_str = self.format_duration(outage_duration)
+                    light_alert = f"🔴 СВІТЛА НЕМАЄ\n\n⏱️ Час відключення: {duration_str}"
+                    
         elif has_light is True:
             # Світло є
             if outage_start is not None:
                 # Світло повернулося після відключення
                 outage_duration = current_time - outage_start
                 duration_str = self.format_duration(outage_duration)
-                power_outage_alert = f"🟢 СВІТЛО ПОВЕРНУЛОСЬ!\n\nЧас відключення: {duration_str}"
                 
-                # Скидаємо час початку відключення
+                # Додаємо інформацію про напругу, якщо вона є
+                voltage_info = ""
+                if voltage is not None:
+                    voltage_info = f"\n🔌 Напруга: {voltage:.1f} В"
+                
+                light_alert = f"🟢 СВІТЛО ПОВЕРНУЛОСЬ!\n\n⏱️ Час відключення: {duration_str}{voltage_info}"
+                
                 set_outage_start_time(None)
         
-        # 3. Отримуємо основне повідомлення (без змін)
+        # 3. Отримуємо основне повідомлення (тільки для кнопки check)
         main_message = self.check_light_status()
         
-        return main_message, voltage_change_alert, power_outage_alert
+        return main_message, voltage_alert, light_alert
 
-# Приклад використання у вашому боті:
+# Приклад використання:
+# 
+# Для автоматичної перевірки (кожні 1-2 хвилини):
 # light_checker = LightChecker()
-# main_msg, voltage_alert, power_alert = light_checker.check_light_status_with_alerts()
+# _, voltage_alert, light_alert = light_checker.check_status_with_alerts()
 # 
 # if voltage_alert:
-#     # Відправляємо окреме повідомлення про зміну напруги
+#     # Відправляємо ТІЛЬКИ це повідомлення про зміну напруги
 #     await bot.send_message(chat_id, voltage_alert)
 # 
-# if power_alert:
-#     # Відправляємо окреме повідомлення про відключення/повернення світла
-#     await bot.send_message(chat_id, power_alert)
+# if light_alert:
+#     # Відправляємо ТІЛЬКИ це повідомлення про зміну стану світла
+#     await bot.send_message(chat_id, light_alert)
 # 
-# # Завжди відправляємо основне повідомлення
-# await bot.send_message(chat_id, main_msg)
+# # Для кнопки "check" (користувач запитує):
+# check_result = light_checker.check_light_status()
+# await bot.send_message(chat_id, check_result)
