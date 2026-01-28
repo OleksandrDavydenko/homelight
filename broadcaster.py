@@ -1,11 +1,11 @@
+# broadcaster.py
 import asyncio
 import logging
 import time
 
 from telegram import Bot
-from config import TELEGRAM_TOKEN
-from db import get_all_subscribed_users
-from light_checker import LightChecker, get_current_state, set_current_state
+from config import TELEGRAM_TOKEN, CHAT_IDS, ADMIN_CHAT_ID
+from light_checker import LightChecker
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -17,11 +17,9 @@ POLL_INTERVAL = 90  # seconds
 
 async def notify_subscribers(bot: Bot, message: str):
     """Відправка повідомлення всім підписаним користувачам"""
-    user_ids=[203148640]
-    #user_ids = get_all_subscribed_users()
-    logger.info("notify_subscribers: retrieved %d subscribed users", len(user_ids))
+    user_ids = CHAT_IDS  # Використовуємо CHAT_IDS з config
     if not user_ids:
-        logger.info("No subscribed users to notify")
+        logger.info("No users to notify")
         return
 
     logger.info("Sending notification to %d users", len(user_ids))
@@ -40,62 +38,23 @@ async def monitor_loop():
     iteration = 0
 
     logger.info("monitor_loop started")
-    # Завантажуємо попередній стан зі змінної пам'яті
-    last_state = get_current_state()
-    if last_state:
-        logger.info("Loaded saved state from memory: %s", last_state)
     
     while True:
         iteration += 1
         logger.info("=== Iteration %d ===", iteration)
         try:
-            # Отримуємо сирий статус без форматування
-            logger.info("Getting device status...")
-            raw = await asyncio.to_thread(checker.get_real_device_status)
-            logger.info("Raw status: %s", raw)
+            # Перевіряємо чи є зміна стану (алерти)
+            logger.info("Checking for alerts...")
+            alert_message = checker.check_for_alerts()
             
-            # Поточний стан: key для порівняння + значення напруги
-            current_state = {
-                "has_light": raw.get("has_light"),
-                "online": raw.get("online"),
-                "reason": raw.get("reason"),
-                "voltage_status": raw.get("voltage_status"),
-                "voltage": raw.get("voltage")
-            }
-            logger.info("Current state: %s", current_state)
-
-            if last_state is None:
-                # Перший запуск - зберігаємо стан
-                last_state = current_state.copy()
-                logger.info("Initial state: %s", current_state)
-                set_current_state(current_state.copy())
-            elif (
-                current_state["has_light"] != last_state.get("has_light") or
-                current_state["online"] != last_state.get("online") or
-                current_state["reason"] != last_state.get("reason") or
-                current_state["voltage_status"] != last_state.get("voltage_status")
-            ):
-                # Деталізований лог для налагодження
-                logger.warning("STATE CHANGE DETECTED:")
-                logger.warning(f"  has_light: {last_state.get('has_light')} -> {current_state['has_light']}")
-                logger.warning(f"  online: {last_state.get('online')} -> {current_state['online']}")
-                logger.warning(f"  reason: {last_state.get('reason')} -> {current_state['reason']}")
-                logger.warning(f"  voltage_status: {last_state.get('voltage_status')} -> {current_state['voltage_status']}")
-                logger.warning(f"  voltage: {last_state.get('voltage')} -> {current_state['voltage']}")
+            if alert_message:
+                logger.info(f"Alert detected: {alert_message[:50]}...")
                 
-                logger.info("Formatting full message...")
-                message = await asyncio.to_thread(checker.check_light_status)
-                logger.info("Formatted message: %s", message)
-                # ТИМЧАСОВО ДЕАКТИВОВАНО ДЛЯ НАЛАГОДЖЕННЯ
-                logger.info("SKIPPING notify_subscribers for debugging")
-                await notify_subscribers(bot, message)
-                logger.info("Would have sent notification")
-                
-                # Оновлюємо стан у пам'яті
-                set_current_state(current_state.copy())
-                last_state = current_state.copy()
+                # Відправляємо алерт всім користувачам
+                await notify_subscribers(bot, alert_message)
             else:
-                logger.debug("No change in state")
+                logger.debug("No alerts - status unchanged")
+                
         except Exception as e:
             logger.exception("Error while checking status: %s", e)
 

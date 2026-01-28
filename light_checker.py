@@ -367,12 +367,14 @@ class LightChecker:
     
 
     # Додайте це в кінець light_checker.py для зворотної сумісності
-_current_state = None
+_current_state = {}
 
-def get_current_state() -> dict | None:
+def get_current_state() -> dict:
     """Отримати поточний стан (для зворотної сумісності)"""
-    return None  # Повертаємо None, оскільки більше не відстежуємо стан
+    global _current_state
+    return _current_state
 
 def set_current_state(state: dict) -> None:
     """Зберегти поточний стан (для зворотної сумісності)"""
-    pass  # Нічого не робимо
+    global _current_state
+    _current_state = state
