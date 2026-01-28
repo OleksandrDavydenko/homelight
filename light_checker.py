@@ -19,10 +19,12 @@ MAX_RETRY_DELAY = 30  # сек
 REQUEST_TIMEOUT = 15  # сек
 STATE_FILE = "/tmp/homelight_state.json"
 OUTAGE_START_FILE = "/tmp/homelight_outage_start.json"  # Файл для зберігання часу початку відключення
+VOLTAGE_STATE_FILE = "/tmp/homelight_voltage_state.json"  # Файл для зберігання попереднього стану напруги
 
 # Глобальний стан для зберігання протягом роботи dyno
 _current_state = None
 _outage_start_time = None
+_previous_voltage_state = None
 
 def get_current_state() -> dict | None:
     """Отримати поточний стан зі змінної"""
@@ -52,6 +54,20 @@ def set_outage_start_time(timestamp: int | None) -> None:
     else:
         logger.info("Час початку відключення скинуто")
 
+def get_previous_voltage_state() -> str | None:
+    """Отримати попередній стан напруги"""
+    global _previous_voltage_state
+    if _previous_voltage_state is None:
+        _previous_voltage_state = load_voltage_state()
+    return _previous_voltage_state
+
+def set_previous_voltage_state(state: str) -> None:
+    """Зберегти стан напруги"""
+    global _previous_voltage_state
+    _previous_voltage_state = state
+    save_voltage_state(state)
+    logger.debug(f"Стан напруги збережено: {state}")
+
 def load_outage_start_time() -> int | None:
     """Завантажити час початку відключення з файлу"""
     try:
@@ -75,6 +91,30 @@ def save_outage_start_time(timestamp: int | None) -> None:
         logger.debug(f"Час початку відключення збережено: {timestamp}")
     except Exception as e:
         logger.exception(f"Помилка при збереженні часу відключення: {e}")
+
+def load_voltage_state() -> str | None:
+    """Завантажити стан напруги з файлу"""
+    try:
+        if os.path.exists(VOLTAGE_STATE_FILE):
+            with open(VOLTAGE_STATE_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                state = data.get("voltage_state")
+                if state:
+                    logger.debug(f"Стан напруги завантажено: {state}")
+                    return state
+    except Exception as e:
+        logger.exception(f"Помилка при завантаженні стану напруги: {e}")
+    return None
+
+def save_voltage_state(state: str) -> None:
+    """Зберегти стан напруги у файл"""
+    try:
+        data = {"voltage_state": state}
+        with open(VOLTAGE_STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        logger.debug(f"Стан напруги збережено: {state}")
+    except Exception as e:
+        logger.exception(f"Помилка при збереженні стану напруги: {e}")
 
 
 class LightChecker:
@@ -213,6 +253,7 @@ class LightChecker:
                 "online": False,
                 "reason": "device_offline",
                 "voltage_status": "unknown",
+                "voltage": None,
                 "last_update_time": current_time,
                 "mac": mac
             }
@@ -256,6 +297,7 @@ class LightChecker:
                         "online": False,
                         "reason": "api_error",
                         "voltage_status": "unknown",
+                        "voltage": None,
                         "last_update_time": int(time.time())
                     }
                 
@@ -265,6 +307,7 @@ class LightChecker:
                     "online": False,
                     "reason": "no_devices",
                     "voltage_status": "unknown",
+                    "voltage": None,
                     "last_update_time": int(time.time())
                 }
             
@@ -282,6 +325,7 @@ class LightChecker:
                 "online": False,
                 "reason": "error",
                 "voltage_status": "unknown",
+                "voltage": None,
                 "last_update_time": int(time.time())
             }
                 
@@ -292,6 +336,7 @@ class LightChecker:
                 "online": False,
                 "reason": "error",
                 "voltage_status": "unknown",
+                "voltage": None,
                 "last_update_time": int(time.time())
             }
 
@@ -353,8 +398,34 @@ class LightChecker:
             hours = (seconds % 86400) // 3600
             return f"{days} дн {hours} год"
 
+    def check_voltage_change(self, voltage_status: str) -> str | None:
+        """Перевіряє зміну стану напруги та повертає повідомлення про зміну"""
+        previous_state = get_previous_voltage_state()
+        current_state = voltage_status
+        
+        # Якщо стан змінився
+        if previous_state and previous_state != current_state:
+            # Оновлюємо стан напруги
+            set_previous_voltage_state(current_state)
+            
+            # Формуємо повідомлення про зміну напруги
+            if current_state == "low":
+                return "⚠️ УВАГА! Зміна стану напруги: низька напруга (< 200В)"
+            elif current_state == "high":
+                return "⚠️ УВАГА! Зміна стану напруги: висока напруга (> 240В)"
+            elif current_state == "normal":
+                return "✅ Напруга повернулася до нормального рівня (200-240В)"
+            elif current_state == "unknown":
+                return "❓ Стан напруги невідомий"
+        
+        # Якщо це перша перевірка, просто зберігаємо стан
+        elif previous_state is None:
+            set_previous_voltage_state(current_state)
+            
+        return None
+
     def check_light_status(self) -> str:
-        """Основна функція для перевірки статусу світла"""
+        """Основна функція для перевірки статусу світла (залишається без змін)"""
         logger.info("Початок перевірки світла")
 
         status = self.get_real_device_status()
@@ -438,3 +509,71 @@ class LightChecker:
             result = f"{header}❓ СТАН НЕВІДОМИЙ"
 
         return result
+
+    def check_light_status_with_alerts(self) -> tuple:
+        """
+        Перевіряє статус світла та повертає кортеж:
+        (основне_повідомлення, повідомлення_про_зміну_напруги, повідомлення_про_відключення)
+        """
+        logger.info("Початок перевірки світла з оповіщеннями")
+
+        status = self.get_real_device_status()
+        
+        # Отримуємо дані
+        voltage = status.get("voltage")
+        voltage_status = status.get("voltage_status", "unknown")
+        has_light = status.get("has_light")
+        online = status.get("online")
+        
+        # Отримуємо поточний час
+        current_time = int(time.time())
+        
+        # Отримуємо час початку відключення
+        outage_start = get_outage_start_time()
+        
+        # Змінні для повідомлень
+        voltage_change_alert = None
+        power_outage_alert = None
+        
+        # 1. Перевіряємо зміну напруги
+        voltage_change_alert = self.check_voltage_change(voltage_status)
+        
+        # 2. Перевіряємо зміну стану світла
+        if not online or has_light is False:
+            # Світла немає
+            if outage_start is None:
+                # Перший раз, коли світло пропало
+                set_outage_start_time(current_time)
+                power_outage_alert = "🔴 СВІТЛО ПРОПАЛО!"
+            # Якщо світло вже було відсутнє, не створюємо повторних повідомлень
+                
+        elif has_light is True:
+            # Світло є
+            if outage_start is not None:
+                # Світло повернулося після відключення
+                outage_duration = current_time - outage_start
+                duration_str = self.format_duration(outage_duration)
+                power_outage_alert = f"🟢 СВІТЛО ПОВЕРНУЛОСЬ!\n\nЧас відключення: {duration_str}"
+                
+                # Скидаємо час початку відключення
+                set_outage_start_time(None)
+        
+        # 3. Отримуємо основне повідомлення (без змін)
+        main_message = self.check_light_status()
+        
+        return main_message, voltage_change_alert, power_outage_alert
+
+# Приклад використання у вашому боті:
+# light_checker = LightChecker()
+# main_msg, voltage_alert, power_alert = light_checker.check_light_status_with_alerts()
+# 
+# if voltage_alert:
+#     # Відправляємо окреме повідомлення про зміну напруги
+#     await bot.send_message(chat_id, voltage_alert)
+# 
+# if power_alert:
+#     # Відправляємо окреме повідомлення про відключення/повернення світла
+#     await bot.send_message(chat_id, power_alert)
+# 
+# # Завжди відправляємо основне повідомлення
+# await bot.send_message(chat_id, main_msg)
