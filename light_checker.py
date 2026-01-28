@@ -493,170 +493,181 @@ class LightChecker:
             is_routine_check: True - автоматична планова перевірка
             is_manual_check: True - ручна перевірка користувачем (/check)
             Якщо обидва False - автоматичний алерт про зміну стану
+            
+        Returns:
+            Завжди повертає непорожній рядок
         """
-        logger.info(f"Початок перевірки світла (тип: {'рутинна' if is_routine_check else 'ручна' if is_manual_check else 'алерт'})")
+        try:
+            logger.info(f"Початок перевірки світла (тип: {'рутинна' if is_routine_check else 'ручна' if is_manual_check else 'алерт'})")
 
-        status = self.get_real_device_status()
-        last_update_time = status.get("last_update_time", 0)
-        time_info = self.get_last_update_time(last_update_time)
+            status = self.get_real_device_status()
+            
+            # Якщо статус None - повертаємо помилку
+            if status is None:
+                return "❌ ПОМИЛКА: Не вдалося отримати статус"
 
-        # Отримуємо дані
-        voltage = status.get("voltage")
-        frequency = status.get("frequency")
-        voltage_status = status.get("voltage_status", "unknown")
-        has_light = status.get("has_light")
-        online = status.get("online")
+            last_update_time = status.get("last_update_time", 0)
+            time_info = self.get_last_update_time(last_update_time)
 
-        # Отримуємо поточний час
-        current_time = int(time.time())
-        formatted_time = self._get_formatted_time()
-        
-        # Отримуємо інформацію про аномалію напруги
-        voltage_anomaly_data = get_voltage_anomaly_start()
-        voltage_anomaly_start = voltage_anomaly_data.get("anomaly_start") if voltage_anomaly_data else None
-        previous_anomaly_type = voltage_anomaly_data.get("anomaly_type") if voltage_anomaly_data else None
-        
-        # Визначаємо, чи є аномалія напруги зараз
-        current_anomaly_type = None
-        if voltage_status == "low":
-            current_anomaly_type = "low"
-        elif voltage_status == "high":
-            current_anomaly_type = "high"
-        
-        # ===== 1. СВІТЛА НЕМАЄ =====
-        if not online or has_light is False:
-            outage_start = get_outage_start_time()
+            # Отримуємо дані
+            voltage = status.get("voltage")
+            frequency = status.get("frequency")
+            voltage_status = status.get("voltage_status", "unknown")
+            has_light = status.get("has_light")
+            online = status.get("online")
+
+            # Отримуємо поточний час
+            current_time = int(time.time())
+            formatted_time = self._get_formatted_time()
             
-            if outage_start is None:
-                # Перше виявлення відключення
-                set_outage_start_time(current_time)
-                # Скидаємо аномалію напруги
-                set_voltage_anomaly_start(None)
+            # Отримуємо інформацію про аномалію напруги
+            voltage_anomaly_data = get_voltage_anomaly_start()
+            voltage_anomaly_start = voltage_anomaly_data.get("anomaly_start") if voltage_anomaly_data else None
+            previous_anomaly_type = voltage_anomaly_data.get("anomaly_type") if voltage_anomaly_data else None
             
-            # Розраховуємо тривалість відключення
-            outage_duration = ""
-            if outage_start:
-                duration_seconds = current_time - outage_start
-                outage_duration = f"\n⏱ Час відключення: {self.format_duration(duration_seconds)}"
+            # Визначаємо, чи є аномалія напруги зараз
+            current_anomaly_type = None
+            if voltage_status == "low":
+                current_anomaly_type = "low"
+            elif voltage_status == "high":
+                current_anomaly_type = "high"
             
-            # Формуємо повідомлення
-            voltage_info = f"\n🔌 Напруга: {voltage:.1f} В" if voltage is not None else ""
-            message = f"❌ СВІТЛА НЕМАЄ{voltage_info}{outage_duration}"
-            
-            # Для ручної перевірки додаємо заголовок
-            if is_manual_check:
-                return f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ: {formatted_time}\n\n{message}"
-            # Для автоматичних алертів - без заголовка
-            elif is_routine_check:
-                return f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ: {formatted_time}\n\n{message}"
-            else:
-                # Автоматичний алерт про відключення (перше виявлення)
-                if outage_start == current_time:  # Тільки що виявили
-                    return message
+            # ===== 1. СВІТЛА НЕМАЄ =====
+            if not online or has_light is False:
+                outage_start = get_outage_start_time()
+                
+                if outage_start is None:
+                    # Перше виявлення відключення
+                    set_outage_start_time(current_time)
+                    # Скидаємо аномалію напруги
+                    set_voltage_anomaly_start(None)
+                
+                # Розраховуємо тривалість відключення
+                outage_duration = ""
+                if outage_start:
+                    duration_seconds = current_time - outage_start
+                    outage_duration = f"\n⏱ Час відключення: {self.format_duration(duration_seconds)}"
+                
+                # Формуємо повідомлення
+                voltage_info = f"\n🔌 Напруга: {voltage:.1f} В" if voltage is not None else ""
+                message = f"❌ СВІТЛА НЕМАЄ{voltage_info}{outage_duration}"
+                
+                # Для ручної/рутинної перевірки додаємо заголовок
+                if is_manual_check or is_routine_check:
+                    return f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ: {formatted_time}\n\n{message}"
                 else:
-                    return ""  # Не відправляємо повторні алерти
-        
-        # ===== 2. СВІТЛО Є =====
-        elif has_light is True:
-            voltage_display = f"{voltage:.1f} В" if voltage is not None else "–"
-            frequency_display = f"{frequency:.1f} Гц" if frequency is not None else "–"
+                    # Автоматичний алерт про відключення
+                    return message
             
-            # Інформація про час
-            time_details = f"\n{time_info}" if time_info else ""
-            
-            # Перевірка на відновлення після відключення
-            outage_start = get_outage_start_time()
-            outage_recovery_info = ""
-            if outage_start:
-                outage_duration = current_time - outage_start
-                if outage_duration > 60:
-                    duration_str = self.format_duration(outage_duration)
-                    outage_recovery_info = f"\n💡 Світла не було: {duration_str}"
-                set_outage_start_time(None)
-            
-            # ===== ЛОГІКА ДЛЯ РІЗНИХ ТИПІВ ПЕРЕВІРОК =====
-            
-            # РУЧНА ПЕРЕВІРКА (/check) - тільки стан, без алертів
-            if is_manual_check:
-                details = f"🔌 Напруга: {voltage_display}\n〰️ Частота: {frequency_display}{time_details}"
-                status_text = "✅ СВІТЛО Є"
-                if voltage_status == "low":
-                    status_text += f"\n⚠️ Напруга низька ({voltage:.1f} В)"
-                elif voltage_status == "high":
-                    status_text += f"\n⚠️ Напруга висока ({voltage:.1f} В)"
+            # ===== 2. СВІТЛО Є =====
+            elif has_light is True:
+                voltage_display = f"{voltage:.1f} В" if voltage is not None else "–"
+                frequency_display = f"{frequency:.1f} Гц" if frequency is not None else "–"
                 
-                return f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ: {formatted_time}\n\n{status_text}\n\n{details}{outage_recovery_info}"
-            
-            # РУТИННА ПЕРЕВІРКА (автоматична, планова)
-            elif is_routine_check:
-                details = f"🔌 Напруга: {voltage_display} (в нормі)\n〰️ Частота: {frequency_display}{time_details}"
-                return f"📈 Стан мережі | {formatted_time}\n──────────────\n{details}\n✅ Світло є. Параметри стабільні.{outage_recovery_info}"
-            
-            # АВТОМАТИЧНИЙ АЛЕРТ (зміна стану)
-            else:
-                # Обробка аномалії напруги
-                voltage_alert = ""
+                # Інформація про час
+                time_details = f"\n{time_info}" if time_info else ""
                 
-                if current_anomaly_type:
-                    if voltage_anomaly_start is None:
-                        # Перше виявлення аномалії
-                        set_voltage_anomaly_start({
-                            "anomaly_start": current_time,
-                            "anomaly_type": current_anomaly_type
-                        })
-                        
-                        if current_anomaly_type == "low":
-                            voltage_alert = f"⚠️ УВАГА! НИЗЬКА НАПРУГА\n──────────────\n🔌 {voltage:.1f} В (< {LOW_VOLTAGE} В)"
-                        else:
-                            voltage_alert = f"⚠️ УВАГА! ВИСОКА НАПРУГА\n──────────────\n🔌 {voltage:.1f} В (> {HIGH_VOLTAGE} В)"
+                # Перевірка на відновлення після відключення
+                outage_start = get_outage_start_time()
+                outage_recovery_info = ""
+                if outage_start:
+                    outage_duration = current_time - outage_start
+                    if outage_duration > 60:
+                        duration_str = self.format_duration(outage_duration)
+                        outage_recovery_info = f"\n💡 Світла не було: {duration_str}"
+                    set_outage_start_time(None)
+                
+                # ===== РУЧНА ПЕРЕВІРКА (/check) =====
+                if is_manual_check:
+                    details = f"🔌 Напруга: {voltage_display}\n〰️ Частота: {frequency_display}{time_details}"
+                    
+                    # Визначаємо статус
+                    if voltage_status == "low":
+                        status_text = f"✅ СВІТЛО Є\n⚠️ Напруга низька ({voltage:.1f} В)"
+                    elif voltage_status == "high":
+                        status_text = f"✅ СВІТЛО Є\n⚠️ Напруга висока ({voltage:.1f} В)"
+                    else:
+                        status_text = "✅ СВІТЛО Є"
+                    
+                    return f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ: {formatted_time}\n\n{status_text}\n\n{details}{outage_recovery_info}"
+                
+                # ===== РУТИННА ПЕРЕВІРКА (автоматична) =====
+                elif is_routine_check:
+                    # Для рутинної перевірки показуємо тільки якщо все в нормі
+                    if voltage_status == "normal":
+                        details = f"🔌 Напруга: {voltage_display} (в нормі)\n〰️ Частота: {frequency_display}{time_details}"
+                        return f"📈 Стан мережі | {formatted_time}\n──────────────\n{details}\n✅ Світло є. Параметри стабільні.{outage_recovery_info}"
+                    else:
+                        # Якщо є проблеми з напругою, не відправляємо рутинне повідомлення
+                        return ""
+                
+                # ===== АВТОМАТИЧНИЙ АЛЕРТ (зміна стану) =====
+                else:
+                    # Обробка аномалії напруги
+                    voltage_alert = ""
+                    
+                    if current_anomaly_type:
+                        if voltage_anomaly_start is None:
+                            # Перше виявлення аномалії
+                            set_voltage_anomaly_start({
+                                "anomaly_start": current_time,
+                                "anomaly_type": current_anomaly_type
+                            })
                             
-                    elif previous_anomaly_type != current_anomaly_type:
-                        # Зміна типу аномалії
+                            if current_anomaly_type == "low":
+                                voltage_alert = f"⚠️ УВАГА! НИЗЬКА НАПРУГА\n──────────────\n🔌 {voltage:.1f} В (< {LOW_VOLTAGE} В)"
+                            else:
+                                voltage_alert = f"⚠️ УВАГА! ВИСОКА НАПРУГА\n──────────────\n🔌 {voltage:.1f} В (> {HIGH_VOLTAGE} В)"
+                                
+                        elif previous_anomaly_type != current_anomaly_type:
+                            # Зміна типу аномалії
+                            anomaly_duration = current_time - voltage_anomaly_start
+                            duration_str = self.format_duration(anomaly_duration)
+                            previous_type = "низька" if previous_anomaly_type == "low" else "висока"
+                            
+                            voltage_alert = f"✅ НАПРУГА В НОРМІ\n──────────────\n🔌 {voltage:.1f} В\n⏱ Тривала аномалія: {duration_str}\n🔹 Тип: {previous_type}\n\n"
+                            
+                            if current_anomaly_type == "low":
+                                voltage_alert += f"⚠️ УВАГА! НИЗЬКА НАПРУГА\n──────────────\n🔌 {voltage:.1f} В (< {LOW_VOLTAGE} В)"
+                            else:
+                                voltage_alert += f"⚠️ УВАГА! ВИСОКА НАПРУГА\n──────────────\n🔌 {voltage:.1f} В (> {HIGH_VOLTAGE} В)"
+                            
+                            set_voltage_anomaly_start({
+                                "anomaly_start": current_time,
+                                "anomaly_type": current_anomaly_type
+                            })
+                        
+                    elif voltage_anomaly_start and not current_anomaly_type:
+                        # Аномалія закінчилася
                         anomaly_duration = current_time - voltage_anomaly_start
                         duration_str = self.format_duration(anomaly_duration)
                         previous_type = "низька" if previous_anomaly_type == "low" else "висока"
-                        
-                        voltage_alert = f"✅ НАПРУГА В НОРМІ\n──────────────\n🔌 {voltage:.1f} В\n⏱ Тривала аномалія: {duration_str}\n🔹 Тип: {previous_type}\n\n"
-                        
-                        if current_anomaly_type == "low":
-                            voltage_alert += f"⚠️ УВАГА! НИЗЬКА НАПРУГА\n──────────────\n🔌 {voltage:.1f} В (< {LOW_VOLTAGE} В)"
-                        else:
-                            voltage_alert += f"⚠️ УВАГА! ВИСОКА НАПРУГА\n──────────────\n🔌 {voltage:.1f} В (> {HIGH_VOLTAGE} В)"
-                        
-                        set_voltage_anomaly_start({
-                            "anomaly_start": current_time,
-                            "anomaly_type": current_anomaly_type
-                        })
+                        voltage_alert = f"✅ НАПРУГА В НОРМІ\n──────────────\n🔌 {voltage:.1f} В\n⏱ Тривала аномалія: {duration_str}\n🔹 Тип: {previous_type}"
+                        set_voltage_anomaly_start(None)
                     
-                elif voltage_anomaly_start and not current_anomaly_type:
-                    # Аномалія закінчилася
-                    anomaly_duration = current_time - voltage_anomaly_start
-                    duration_str = self.format_duration(anomaly_duration)
-                    previous_type = "низька" if previous_anomaly_type == "low" else "висока"
-                    voltage_alert = f"✅ НАПРУГА В НОРМІ\n──────────────\n🔌 {voltage:.1f} В\n⏱ Тривала аномалія: {duration_str}\n🔹 Тип: {previous_type}"
-                    set_voltage_anomaly_start(None)
-                
-                # Формування результату
-                if voltage_alert:
-                    result = voltage_alert
-                    if outage_recovery_info:
-                        result += outage_recovery_info
-                    return result
-                elif outage_recovery_info:
-                    # Відновлення після відключення
-                    details = f"🔌 Напруга: {voltage_display}\n〰️ Частота: {frequency_display}{time_details}"
-                    return f"✅ СВІТЛО ВІДНОВЛЕНО\n──────────────\n{details}{outage_recovery_info}"
-                else:
-                    # Немає змін статусу - нічого не відправляємо
-                    return ""
-        
-        # ===== 3. НЕСПОДІВАНА СИТУАЦІЯ =====
-        else:
-            logger.error(f"Несподіване значення has_light: {has_light}")
-            if is_manual_check or is_routine_check:
-                return f"📊 РЕЗУЛЬТАТ ПЕРЕВІРКИ: {formatted_time}\n\n❓ ПОМИЛКА СИСТЕМИ"
+                    # Формування результату
+                    if voltage_alert:
+                        result = voltage_alert
+                        if outage_recovery_info:
+                            result += outage_recovery_info
+                        return result
+                    elif outage_recovery_info:
+                        # Відновлення після відключення
+                        details = f"🔌 Напруга: {voltage_display}\n〰️ Частота: {frequency_display}{time_details}"
+                        return f"✅ СВІТЛО ВІДНОВЛЕНО\n──────────────\n{details}{outage_recovery_info}"
+                    else:
+                        # Немає змін статусу - нічого не відправляємо
+                        # Але для ручної перевірки ми сюди не потрапляємо
+                        return ""
+            
+            # ===== 3. НЕСПОДІВАНА СИТУАЦІЯ =====
             else:
-                return f"❓ ПОМИЛКА СИСТЕМИ"
+                logger.error(f"Несподіване значення has_light: {has_light}")
+                return f"❓ НЕВІДОМИЙ СТАН СИСТЕМИ"
+                
+        except Exception as e:
+            logger.error(f"Помилка в check_light_status: {e}")
+            return f"❌ ПОМИЛКА ПРИ ПЕРЕВІРЦІ: {str(e)}"
 
     # Допоміжний метод для перевірки з різними типами повідомлень
     def check_light(self, is_routine: bool = False) -> str:
