@@ -9,29 +9,17 @@ from config import SHELLY_AUTH_KEY, SHELLY_BASE_URL, TARGET_MAC, TIMEZONE
 
 logger = logging.getLogger(__name__)
 
-# Константи для перевірки напруги
-MIN_VOLTAGE = 100  # В
+# Константи
+MIN_VOLTAGE = 100  # Мінімальна напруга для вважання що світло є
 MAX_RETRY_ATTEMPTS = 5
 INITIAL_RETRY_DELAY = 2  # сек
 MAX_RETRY_DELAY = 30  # сек
 REQUEST_TIMEOUT = 15  # сек
-STATE_FILE = "/tmp/homelight_state.json"
-OUTAGE_START_FILE = "/tmp/homelight_outage_start.json"  # Файл для зберігання часу початку відключення
+OUTAGE_START_FILE = "/tmp/homelight_outage_start.json"
 
-# Глобальний стан для зберігання протягом роботи dyno
-_current_state = None
+# Глобальний стан
 _outage_start_time = None
 
-def get_current_state() -> dict | None:
-    """Отримати поточний стан зі змінної"""
-    global _current_state
-    return _current_state
-
-def set_current_state(state: dict) -> None:
-    """Зберегти поточний стан у змінну"""
-    global _current_state
-    _current_state = state
-    logger.debug(f"Стан оновлено в пам'яті: {state}")
 
 def get_outage_start_time() -> int | None:
     """Отримати час початку відключення"""
@@ -39,6 +27,7 @@ def get_outage_start_time() -> int | None:
     if _outage_start_time is None:
         _outage_start_time = load_outage_start_time()
     return _outage_start_time
+
 
 def set_outage_start_time(timestamp: int | None) -> None:
     """Встановити час початку відключення"""
@@ -49,6 +38,7 @@ def set_outage_start_time(timestamp: int | None) -> None:
         logger.info(f"Час початку відключення встановлено: {timestamp}")
     else:
         logger.info("Час початку відключення скинуто")
+
 
 def load_outage_start_time() -> int | None:
     """Завантажити час початку відключення з файлу"""
@@ -63,6 +53,7 @@ def load_outage_start_time() -> int | None:
     except Exception as e:
         logger.exception(f"Помилка при завантаженні часу відключення: {e}")
     return None
+
 
 def save_outage_start_time(timestamp: int | None) -> None:
     """Зберегти час початку відключення у файл"""
@@ -100,12 +91,6 @@ class LightChecker:
 
                 if r.status_code != 200:
                     logger.error(f"HTTP помилка: {r.status_code}, тіло: {r.text[:300]}")
-                    
-                    if r.status_code == 401:
-                        j = r.json()
-                        error_msg = j.get("error", "Unauthorized")
-                        raise RuntimeError(f"Помилка авторизації (401): {error_msg}")
-                    
                     r.raise_for_status()
 
                 j = r.json()
@@ -123,25 +108,26 @@ class LightChecker:
                     time.sleep(delay)
                     delay = min(delay * 2, MAX_RETRY_DELAY)
                 else:
-                    raise RuntimeError(f"Не вдалося отримати дані після {max_retries} спроб")
+                    raise RuntimeError(f"Не вдалося отримати дані")
 
-        raise RuntimeError("Помилка: постійний 429 (rate limit). Спробуйте через 1-2 хвилини.")
+        raise RuntimeError("Не вдалося отримати дані")
 
     def pick_device(self, data: dict):
         """Вибір цільового пристрою з отриманих даних"""
         devices_status = data.get("devices_status", {})
         
         if not devices_status:
-            raise RuntimeError("devices_status порожній")
+            raise RuntimeError("Немає пристроїв")
 
         # Якщо вказано конкретний MAC
         if self.target_mac:
             for mac in [self.target_mac.lower(), self.target_mac.upper(), self.target_mac]:
                 if mac in devices_status:
-                    logger.info(f"Знайдено цільовий пристрій: {mac}")
+                    logger.info(f"Знайдено пристрій: {mac}")
                     return mac, devices_status[mac]
 
             logger.warning(f"Не знайдено пристрій з MAC: {self.target_mac}")
+            raise RuntimeError("Пристрій не знайдено")
 
         # Беремо перший пристрій
         first_mac = next(iter(devices_status.keys()))
@@ -149,129 +135,68 @@ class LightChecker:
         return first_mac, devices_status[first_mac]
 
     def _extract_switch_data(self, device_data: dict) -> tuple:
-        """Витяг даних про напругу, потужність та інше зі switch пристрою"""
+        """Витяг даних про напругу з пристрою"""
         voltage = None
-        power = None
-        current_amp = None
         frequency = None
-        switch_state = None
 
         for key, value in device_data.items():
             if key.startswith('switch') and isinstance(value, dict):
-                logger.debug(f"Знайдено {key}")
                 voltage = value.get('voltage')
-                power = value.get('apower')
-                current_amp = value.get('current')
                 frequency = value.get('freq')
-                switch_state = value.get('output')
                 break
 
-        return voltage, power, current_amp, frequency, switch_state
+        return voltage, frequency
 
-    def _determine_has_light(self, voltage, power, current_amp) -> bool | None:
-        """Визначення наявності світла на основі параметрів"""
+    def _determine_has_light(self, voltage) -> bool:
+        """Визначення наявності світла на основі напруги"""
         if voltage is None:
             logger.warning("Не вдалося отримати напругу")
-            return None
-
-        if voltage > MIN_VOLTAGE:
-            logger.info(f"Напруга більше {MIN_VOLTAGE}В ({voltage} V)")
-            return True
-        else:
-            logger.info(f"Напруга менше {MIN_VOLTAGE}В ({voltage} V)")
             return False
 
-    def analyze_device_data(self, mac: str, device_data: dict):
-        """Аналіз даних пристрою та визначення статусу світла"""
-        logger.info(f"Аналіз даних для пристрою {mac}...")
+        if voltage > MIN_VOLTAGE:
+            logger.info(f"Напруга {voltage} В - світло Є")
+            return True
+        else:
+            logger.info(f"Напруга {voltage} В - світла НЕМАЄ")
+            return False
 
-        current_time = int(time.time())
-        sys_info = device_data.get('sys', {})
-        online = sys_info.get('mac') is not None
-
-        if not online:
-            logger.warning(f"Пристрій {mac} не знайдено або OFFLINE")
-            return {
-                "has_light": False,
-                "online": False,
-                "reason": "device_offline",
-                "voltage": None,
-                "last_update_time": current_time,
-                "mac": mac
-            }
-
-        # Витягуємо дані про switch
-        voltage, power, current_amp, frequency, switch_state = self._extract_switch_data(device_data)
-        has_light = self._determine_has_light(voltage, power, current_amp)
-
-        logger.info(f"Підсумок: світло {'Є' if has_light else 'Немає' if has_light is False else 'Невідомо'}")
-
-        return {
-            "has_light": has_light,
-            "online": True,
-            "voltage": voltage,
-            "power": power,
-            "current": current_amp,
-            "frequency": frequency,
-            "switch_state": switch_state,
-            "last_update_time": sys_info.get('last_sync_ts', current_time),
-            "mac": mac
-        }
-
-    def get_real_device_status(self):
-        """Отримання реального статусу пристрою з Shelly Cloud"""
-        logger.info("Початок перевірки")
+    def get_device_status(self):
+        """Отримання статусу пристрою"""
+        logger.info("Перевірка статусу")
 
         try:
-            # Отримуємо всі дані
+            # Отримуємо дані
             data = self.fetch_all_status()
             
-            # Перевіряємо, чи є devices_status у даних
+            # Перевіряємо чи є пристрої
             if "devices_status" not in data:
-                logger.error(f"В даних відсутній ключ 'devices_status'. Отримані ключі: {list(data.keys())}")
-                
-                if not data.get("isok", True):
-                    error_msg = data.get("error", "Unknown API error")
-                    return {
-                        "has_light": False,
-                        "online": False,
-                        "reason": "api_error",
-                        "voltage": None,
-                        "last_update_time": int(time.time())
-                    }
-                
-                # Якщо немає пристроїв
+                logger.error("Немає даних про пристрої")
                 return {
                     "has_light": False,
-                    "online": False,
-                    "reason": "no_devices",
                     "voltage": None,
                     "last_update_time": int(time.time())
                 }
             
             # Вибираємо пристрій
             mac, device_data = self.pick_device(data)
-            logger.info(f"Обрано пристрій: {mac}")
-            return self.analyze_device_data(mac, device_data)
-
-        except RuntimeError as e:
-            error_msg = str(e)
-            logger.error(f"Помилка: {error_msg}")
+            
+            # Аналізуємо дані
+            current_time = int(time.time())
+            voltage, frequency = self._extract_switch_data(device_data)
+            has_light = self._determine_has_light(voltage)
             
             return {
-                "has_light": False,
-                "online": False,
-                "reason": "error",
-                "voltage": None,
-                "last_update_time": int(time.time())
+                "has_light": has_light,
+                "voltage": voltage,
+                "frequency": frequency,
+                "last_update_time": current_time
             }
-                
+
         except Exception as e:
-            logger.exception(f"Виняток: {type(e).__name__}: {str(e)}")
+            logger.error(f"Помилка: {e}")
+            # Якщо будь-яка помилка - світла немає
             return {
                 "has_light": False,
-                "online": False,
-                "reason": "error",
                 "voltage": None,
                 "last_update_time": int(time.time())
             }
@@ -336,9 +261,9 @@ class LightChecker:
 
     def check_light_status(self) -> str:
         """Основна функція для перевірки статусу світла (для кнопки check)"""
-        logger.info("Початок перевірки світла")
+        logger.info("Перевірка світла")
 
-        status = self.get_real_device_status()
+        status = self.get_device_status()
         last_update_time = status.get("last_update_time", 0)
         time_info = self.get_last_update_time(last_update_time)
 
@@ -346,7 +271,6 @@ class LightChecker:
         voltage = status.get("voltage")
         frequency = status.get("frequency")
         has_light = status.get("has_light")
-        online = status.get("online")
 
         # Отримуємо поточний час для заголовка
         try:
@@ -364,27 +288,11 @@ class LightChecker:
         # Отримуємо час початку відключення
         outage_start = get_outage_start_time()
         
-        # Логіка для відстеження відключення
-        if not online or has_light is False:
-            # Світла немає
-            if outage_start is None:
-                # Встановлюємо час початку відключення (перший раз)
-                set_outage_start_time(current_time)
-                outage_duration_info = ""
-            else:
-                # Розраховуємо тривалість відключення
-                outage_duration = current_time - outage_start
-                duration_str = self.format_duration(outage_duration)
-                outage_duration_info = f"⏱️ Час відключення: {duration_str}\n"
+        # Перевіряємо чи є світло
+        if has_light:
+            # Світло Є
             
-            # Формуємо повідомлення
-            if time_info:
-                result = f"{header}❌ СВІТЛА НЕМАЄ\n\n{outage_duration_info}{time_info}"
-            else:
-                result = f"{header}❌ СВІТЛА НЕМАЄ\n\n{outage_duration_info}".strip()
-                
-        elif has_light is True:
-            # Світло є
+            # Формуємо деталі
             voltage_display = f"{voltage:.1f} В" if voltage is not None else "–"
             frequency_display = f"{frequency:.1f} Гц" if frequency is not None else "–"
             
@@ -394,11 +302,11 @@ class LightChecker:
             if time_info:
                 details += f"\n{time_info}"
             
-            # Додаємо інформацію про тривалість відключення, якщо воно було
+            # Перевіряємо чи було відключення
             outage_duration_info = ""
             if outage_start:
                 outage_duration = current_time - outage_start
-                if outage_duration > 60:  # Якщо відключення було більше 1 хвилини
+                if outage_duration > 60:
                     duration_str = self.format_duration(outage_duration)
                     outage_duration_info = f"\n\n💡 Світла не було: {duration_str}"
                 
@@ -408,48 +316,44 @@ class LightChecker:
             result = f"{header}✅ СВІТЛО Є\n\n{details}{outage_duration_info}"
                 
         else:
-            # Невідомий стан
-            result = f"{header}❓ СТАН НЕВІДОМИЙ"
+            # Світла НЕМАЄ
+            current_time = int(time.time())
+            
+            if outage_start is None:
+                # Перше повідомлення про відключення
+                set_outage_start_time(current_time)
+                outage_duration_info = ""
+            else:
+                # Відключення триває
+                outage_duration = current_time - outage_start
+                duration_str = self.format_duration(outage_duration)
+                outage_duration_info = f"⏱️ Час відключення: {duration_str}\n"
+            
+            # Формуємо повідомлення
+            if time_info:
+                result = f"{header}❌ СВІТЛА НЕМАЄ\n\n{outage_duration_info}{time_info}"
+            else:
+                result = f"{header}❌ СВІТЛА НЕМАЄ\n\n{outage_duration_info}".strip()
 
         return result
 
-    def check_status_for_alerts(self) -> str | None:
+    def check_for_alerts(self) -> str | None:
         """
         Перевіряє статус світла та повертає повідомлення тільки при зміні стану.
         Повертає None якщо стан не змінився.
         """
-        logger.info("Перевірка статусу для алертів")
+        logger.info("Перевірка для алертів")
 
-        status = self.get_real_device_status()
+        status = self.get_device_status()
         
         has_light = status.get("has_light")
-        online = status.get("online")
         
         current_time = int(time.time())
         outage_start = get_outage_start_time()
         
-        # Визначаємо поточний стан світла
-        current_light_state = "on" if (online and has_light is True) else "off"
-        
-        # Перевіряємо зміну стану світла
-        if not online or has_light is False:
-            # Світла немає
-            if outage_start is None:
-                # Перший раз, коли світло пропало
-                set_outage_start_time(current_time)
-                return "🔴 СВІТЛО ПРОПАЛО!"
-            
-            else:
-                # Світло вже відсутнє - перевіряємо, чи потрібно оновлювати повідомлення
-                outage_duration = current_time - outage_start
-                
-                # Відправляємо оновлення кожні 5 хвилин
-                if outage_duration % 300 == 0:  # Кожні 5 хвилин (300 секунд)
-                    duration_str = self.format_duration(outage_duration)
-                    return f"🔴 СВІТЛА НЕМАЄ\n\n⏱️ Час відключення: {duration_str}"
-                    
-        elif has_light is True:
-            # Світло є
+        # Перевіряємо зміну стану
+        if has_light:
+            # Світло Є
             if outage_start is not None:
                 # Світло повернулося після відключення
                 outage_duration = current_time - outage_start
@@ -460,6 +364,12 @@ class LightChecker:
                 
                 return f"🟢 СВІТЛО ПОВЕРНУЛОСЬ!\n\n⏱️ Час відключення: {duration_str}"
         
+        else:
+            # Світла НЕМАЄ
+            if outage_start is None:
+                # Перший раз, коли світло пропало
+                set_outage_start_time(current_time)
+                return "🔴 СВІТЛО ПРОПАЛО!"
+        
         # Якщо стан не змінився
         return None
-
