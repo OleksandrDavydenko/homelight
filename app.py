@@ -1,352 +1,261 @@
-import logging
 import asyncio
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, BotCommand, BotCommandScopeChat
-from telegram.ext import Application, CommandHandler, CallbackContext, ChatMemberHandler, MessageHandler, filters
-from light_checker import LightChecker
-from config import TELEGRAM_TOKEN
-from db import get_user_subscription, update_subscription, add_user
-import broadcaster
+import contextlib
+import logging
+import time
 
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+from telegram import BotCommand, BotCommandScopeChat, KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram.constants import ChatMemberStatus, ChatType
+from telegram.error import TelegramError
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    ChatMemberHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
 )
+
+import announcement
+import broadcaster
+import config
+import db
+from light_checker import LightChecker, StateTracker, format_status_message
+
 logger = logging.getLogger(__name__)
 
-light_checker = LightChecker()
+# Тексти кнопок не змінювати: їх надсилають клавіатури, які вже є в користувачів
+BTN_SUBSCRIBE = "🔔 Підписатись"
+BTN_UNSUBSCRIBE = "🔕 Відписатись"
+BTN_CHECK = "🔌 Перевірити наявність електроенергії"
+BTN_INFO = "ℹ️ Довідка"
 
-# Глобальна змінна для зберігання клавіатури
-_user_keyboards = {}
+# Кнопка «Перевірити»: швидше за фонову перевірку, щоб користувач не чекав довго
+CHECK_CACHE_SECONDS = 30
+CHECK_ATTEMPTS = 2
+CHECK_TIMEOUT = 8
 
-def get_subscription_keyboard(telegram_id):
-    """Отримання клавіатури з кнопкою 'Підписатись' або 'Відписатись' залежно від статусу"""
-    user_subscribed = get_user_subscription(telegram_id)
+ABOUT = "Я бот для перевірки наявності електроенергії в будинку на Полтавській 64."
 
-    if user_subscribed is True:
-        keyboard = [
-            [KeyboardButton("🔕 Відписатись")],
-            [KeyboardButton("🔌 Перевірити наявність електроенергії")],
-            [KeyboardButton("ℹ️ Довідка")]
-        ]
-    else:
-        keyboard = [
-            [KeyboardButton("🔔 Підписатись")],
-            [KeyboardButton("🔌 Перевірити наявність електроенергії")],
-            [KeyboardButton("ℹ️ Довідка")]
-        ]
-    
-    # Зберігаємо клавіатуру у глобальному словнику
-    _user_keyboards[telegram_id] = keyboard
-    return keyboard
+DEFAULT_COMMANDS = [
+    BotCommand("check", "Перевірити наявність світла"),
+    BotCommand("help", "Показати довідку"),
+]
 
-def get_cached_keyboard(telegram_id):
-    """Отримати збережену клавіатуру або створити нову"""
-    if telegram_id in _user_keyboards:
-        return _user_keyboards[telegram_id]
-    return get_subscription_keyboard(telegram_id)
 
-async def set_bot_menu(app):
-    """Асинхронне додавання команд у меню бота"""
-    commands = [
-        BotCommand("check", "Перевірити наявність світла"),
-        BotCommand("help", "Показати довідку")
-    ]
-    try:
-        await app.bot.set_my_commands(commands)
-        logger.info("Bot menu commands set successfully")
-        
-        # Запускаємо broadcaster як фонове завдання
-        try:
-            logger.info("Starting broadcaster.monitor_loop as background task")
-            # Перевіряємо, чи має broadcaster.monitor_loop приймати параметри
-            import inspect
-            sig = inspect.signature(broadcaster.monitor_loop)
-            if len(sig.parameters) == 0:
-                # Якщо monitor_loop не приймає параметрів
-                asyncio.create_task(broadcaster.monitor_loop())
-            else:
-                # Якщо monitor_loop потребує параметр bot
-                from telegram import Bot
-                bot_instance = Bot(token=TELEGRAM_TOKEN)
-                asyncio.create_task(broadcaster.monitor_loop(bot=bot_instance))
-        except Exception as e:
-            logger.exception(f"Failed to start broadcaster.monitor_loop: {e}")
-    except Exception as e:
-        logger.exception(f"Failed to set bot menu commands: {e}")
-
-async def send_welcome_message(update: Update, context: CallbackContext) -> None:
-    """Відправка повідомлення з кнопкою 'Підписатись' або 'Відписатись'"""
-    user = update.effective_user
-    telegram_id = user.id
-    
-    # Спочатку відправляємо повідомлення з клавіатурою
-    keyboard = get_subscription_keyboard(telegram_id)
-    reply_markup = ReplyKeyboardMarkup(
-        keyboard, 
-        resize_keyboard=True, 
-        one_time_keyboard=False,
-        selective=True  # Додаємо selective для кращої підтримки
+def build_keyboard(subscribed: bool) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton(BTN_UNSUBSCRIBE if subscribed else BTN_SUBSCRIBE)],
+            [KeyboardButton(BTN_CHECK)],
+            [KeyboardButton(BTN_INFO)],
+        ],
+        resize_keyboard=True,
+        selective=True,
     )
-    
-    welcome_message = (
-        f"👋 Вітаю, {user.first_name}!\n\n"
-        "Я бот для перевірки наявності електроенергії в будинку на Полтавській 64.\n"
-        "Натисніть на потрібну кнопку."
-    )
-    
-    # Використовуємо reply_text для відправки з клавіатурою
-    await update.message.reply_text(welcome_message, reply_markup=reply_markup)
-    
-    # Потім оновлюємо базу даних (асинхронно)
-    try:
-        await asyncio.to_thread(add_user, telegram_id, user.first_name, False)
-        logger.info(f"User {telegram_id} added to database")
-    except Exception as e:
-        logger.exception(f"Failed to add user to database: {e}")
-    
-    # Оновлюємо меню команд
-    try:
-        user_subscribed = await asyncio.to_thread(get_user_subscription, telegram_id)
-        chat_commands = [
-            BotCommand("check", "Перевірити наявність світла"),
-            BotCommand("help", "Показати довідку")
-        ]
-        if user_subscribed is True:
-            chat_commands.insert(0, BotCommand("unsubscribe", "Відписатись"))
-        else:
-            chat_commands.insert(0, BotCommand("subscribe", "Підписатись"))
 
-        await context.application.bot.set_my_commands(
-            chat_commands, 
-            scope=BotCommandScopeChat(chat_id=telegram_id)
-        )
-        logger.info(f"Set chat-scoped commands for {telegram_id}")
-    except Exception as e:
-        logger.exception(f"Failed to set chat commands: {e}")
 
-async def handle_text_message(update: Update, context: CallbackContext) -> None:
-    """Обробник текстових повідомлень"""
-    if not update.message or not update.effective_user:
+def chat_commands(subscribed: bool) -> list[BotCommand]:
+    toggle = (BotCommand("unsubscribe", "Відписатись") if subscribed
+              else BotCommand("subscribe", "Підписатись"))
+    return [toggle, *DEFAULT_COMMANDS]
+
+
+async def update_chat_commands(bot, chat_id: int, subscribed: bool) -> None:
+    """Меню команд для конкретного чату. Помилка тут не критична."""
+    try:
+        await bot.set_my_commands(chat_commands(subscribed), scope=BotCommandScopeChat(chat_id=chat_id))
+    except TelegramError as e:
+        logger.warning("Не вдалося оновити меню команд для %s: %s", chat_id, e)
+
+
+# ---------- Обробники ----------
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user, message = update.effective_user, update.effective_message
+    if user is None or message is None:
         return
+    await asyncio.to_thread(db.ensure_user, user.id, user.first_name or "")
+    subscribed = await asyncio.to_thread(db.get_user_subscription, user.id)
+    await message.reply_text(
+        f"👋 Вітаю, {user.first_name}!\n\n{ABOUT}\nНатисніть на потрібну кнопку.",
+        reply_markup=build_keyboard(subscribed),
+    )
+    await update_chat_commands(context.bot, user.id, subscribed)
 
-    text = update.message.text.strip()
-    telegram_id = update.effective_user.id
-    first_name = update.effective_user.first_name or ''
 
-    try:
-        if text == '🔔 Підписатись':
-            logger.info(f"Subscribe requested for {telegram_id}")
-            await asyncio.to_thread(add_user, telegram_id, first_name, True)
-            
-            # Відправляємо підтвердження
-            await update.message.reply_text('✅ Ви підписалися на отримання оновлень.')
-            
-            # Оновлюємо клавіатуру
-            keyboard = get_subscription_keyboard(telegram_id)
-            reply_markup = ReplyKeyboardMarkup(
-                keyboard, 
-                resize_keyboard=True, 
-                one_time_keyboard=False,
-                selective=True
-            )
-            await update.message.reply_text('Натисніть для подальших дій:', reply_markup=reply_markup)
-            
-            # Оновлюємо меню команд
-            try:
-                chat_commands = [
-                    BotCommand("unsubscribe", "Відписатись"),
-                    BotCommand("check", "Перевірити наявність світла"),
-                    BotCommand("help", "Показати довідку")
-                ]
-                await context.application.bot.set_my_commands(
-                    chat_commands, 
-                    scope=BotCommandScopeChat(chat_id=telegram_id)
-                )
-            except Exception as e:
-                logger.exception(f"Failed to update chat commands: {e}")
-                
-        elif text == '🔕 Відписатись':
-            logger.info(f"Unsubscribe requested for {telegram_id}")
-            await asyncio.to_thread(update_subscription, telegram_id, False)
-            
-            await update.message.reply_text('❌ Ви відписалися від отримання оновлень.')
-            
-            # Оновлюємо клавіатуру
-            keyboard = get_subscription_keyboard(telegram_id)
-            reply_markup = ReplyKeyboardMarkup(
-                keyboard, 
-                resize_keyboard=True, 
-                one_time_keyboard=False,
-                selective=True
-            )
-            await update.message.reply_text('Натисніть для подальших дій:', reply_markup=reply_markup)
-            
-            # Оновлюємо меню команд
-            try:
-                chat_commands = [
-                    BotCommand("subscribe", "Підписатись"),
-                    BotCommand("check", "Перевірити наявність світла"),
-                    BotCommand("help", "Показати довідку")
-                ]
-                await context.application.bot.set_my_commands(
-                    chat_commands, 
-                    scope=BotCommandScopeChat(chat_id=telegram_id)
-                )
-            except Exception as e:
-                logger.exception(f"Failed to update chat commands: {e}")
-                
-        elif text == '🔌 Перевірити наявність електроенергії':
-            await update.message.reply_text("🔄 Перевіряю наявність електроенергії...")
-            try:
-                result = await asyncio.to_thread(light_checker.check_light_status)
-                await update.message.reply_text(result)
-            except Exception as e:
-                logger.error(f"Error checking light: {e}")
-                await update.message.reply_text("❌ Сталася помилка при перевірці. Спробуйте пізніше.")
-                
-        elif text == 'ℹ️ Довідка':
-            info_text = (
-                "Я бот для перевірки наявності електроенергії в будинку на Полтавській 64.\n\n"
-                "- Можна натиснути '🔌 Перевірити наявність електроенергії' для миттєвої перевірки.\n"
-                "- Натисніть '🔔 Підписатись' щоб отримувати повідомлення при зміни статусу, або '🔕 Відписатись' щоб вимкнути сповіщення.\n\n"
-                "Якщо потрібна допомога — напишіть /help"
-            )
-            await update.message.reply_text(info_text)
-            
-        else:
-            # Для будь-якого іншого тексту - показуємо клавіатуру знову
-            keyboard = get_cached_keyboard(telegram_id)
-            reply_markup = ReplyKeyboardMarkup(
-                keyboard, 
-                resize_keyboard=True, 
-                one_time_keyboard=False,
-                selective=True
-            )
-            await update.message.reply_text(
-                "Оберіть дію з клавіатури:",
-                reply_markup=reply_markup
-            )
-            
-    except Exception as e:
-        logger.exception(f"Error handling message: {e}")
-        await update.message.reply_text('Сталася помилка. Спробуйте пізніше.')
+async def _change_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                               subscribe: bool) -> None:
+    user, message = update.effective_user, update.effective_message
+    if user is None or message is None:
+        return
+    await asyncio.to_thread(db.set_subscription, user.id, user.first_name or "", subscribe)
+    text = ("✅ Ви підписалися на отримання оновлень." if subscribe
+            else "❌ Ви відписалися від отримання оновлень.")
+    await message.reply_text(text, reply_markup=build_keyboard(subscribe))
+    await update_chat_commands(context.bot, user.id, subscribe)
 
-async def help_command(update: Update, context: CallbackContext) -> None:
-    """Обробник команди /help"""
-    help_text = (
+
+async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _change_subscription(update, context, True)
+
+
+async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _change_subscription(update, context, False)
+
+
+async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    message = update.effective_message
+    if message is None:
+        return
+    await message.reply_text("🔄 Перевіряю наявність електроенергії...")
+    checker: LightChecker = context.bot_data["checker"]
+    tracker: StateTracker = context.bot_data["tracker"]
+    reading = await asyncio.to_thread(
+        checker.get_reading,
+        max_age=CHECK_CACHE_SECONDS, attempts=CHECK_ATTEMPTS, timeout=CHECK_TIMEOUT,
+    )
+    await message.reply_text(format_status_message(reading, tracker, int(time.time())))
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_message is None:
+        return
+    await update.effective_message.reply_text(
         "Доступні команди:\n"
         "/start - Почати роботу з ботом\n"
         "/check - Перевірити наявність світла\n"
+        "/subscribe - Підписатись на сповіщення\n"
+        "/unsubscribe - Відписатись від сповіщень\n"
         "/help - Показати це повідомлення\n\n"
-        "Ви також можете натиснути кнопку '🔌 Перевірити наявність електроенергії' у клавіатурі."
+        f"Ви також можете натиснути кнопку '{BTN_CHECK}' у клавіатурі."
     )
 
-    await update.message.reply_text(help_text)
 
-async def subscribe_command(update: Update, context: CallbackContext) -> None:
-    """Обробник команди /subscribe"""
-    if not update.message or not update.effective_user:
+async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_message is None:
         return
-    telegram_id = update.effective_user.id
-    first_name = update.effective_user.first_name or ''
-    
-    try:
-        await asyncio.to_thread(add_user, telegram_id, first_name, True)
-        await update.message.reply_text('✅ Ви підписалися на отримання оновлень.')
-        
-        # Оновлюємо клавіатуру
-        keyboard = get_subscription_keyboard(telegram_id)
-        reply_markup = ReplyKeyboardMarkup(
-            keyboard, 
-            resize_keyboard=True, 
-            one_time_keyboard=False,
-            selective=True
-        )
-        await update.message.reply_text('Натисніть для подальших дій:', reply_markup=reply_markup)
-        
-    except Exception as e:
-        logger.exception(f"Error in /subscribe: {e}")
-        await update.message.reply_text('Сталася помилка. Спробуйте пізніше.')
+    await update.effective_message.reply_text(
+        f"{ABOUT}\n\n"
+        f"- Натисніть '{BTN_CHECK}' для миттєвої перевірки.\n"
+        f"- Натисніть '{BTN_SUBSCRIBE}', щоб отримувати повідомлення, коли світло зникає "
+        f"або з'являється, або '{BTN_UNSUBSCRIBE}', щоб вимкнути сповіщення.\n\n"
+        "Якщо потрібна допомога — напишіть /help"
+    )
 
-async def unsubscribe_command(update: Update, context: CallbackContext) -> None:
-    """Обробник команди /unsubscribe"""
-    if not update.message or not update.effective_user:
+
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Будь-яке інше повідомлення в приватному чаті — показати клавіатуру."""
+    user, message = update.effective_user, update.effective_message
+    if user is None or message is None:
         return
-    telegram_id = update.effective_user.id
-    
-    try:
-        await asyncio.to_thread(update_subscription, telegram_id, False)
-        await update.message.reply_text('❌ Ви відписалися від отримання оновлень.')
-        
-        # Оновлюємо клавіатуру
-        keyboard = get_subscription_keyboard(telegram_id)
-        reply_markup = ReplyKeyboardMarkup(
-            keyboard, 
-            resize_keyboard=True, 
-            one_time_keyboard=False,
-            selective=True
-        )
-        await update.message.reply_text('Натисніть для подальших дій:', reply_markup=reply_markup)
-        
-    except Exception as e:
-        logger.exception(f"Error in /unsubscribe: {e}")
-        await update.message.reply_text('Сталася помилка. Спробуйте пізніше.')
+    subscribed = await asyncio.to_thread(db.get_user_subscription, user.id)
+    await message.reply_text("Оберіть дію з клавіатури:", reply_markup=build_keyboard(subscribed))
 
-async def check_command(update: Update, context: CallbackContext) -> None:
-    """Обробник команди /check"""
-    await update.message.reply_text("🔄 Перевіряю наявність електроенергії...")
-    try:
-        result = await asyncio.to_thread(light_checker.check_light_status)
-        await update.message.reply_text(result)
-    except Exception as e:
-        logger.error(f"Помилка при перевірці світла: {e}")
-        await update.message.reply_text("❌ Сталася помилка при перевірці. Спробуйте пізніше.")
 
-async def chat_member_handler(update: Update, context: CallbackContext) -> None:
-    """Обробник подій зміни статусу користувача в чаті"""
-    if update.chat_member.new_chat_member.status == "member":
-        await send_welcome_message(update, context)
+async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Користувач заблокував бота — відписуємо, щоб не слати йому сповіщення."""
+    change = update.my_chat_member
+    if change is None or change.chat.type != ChatType.PRIVATE:
+        return
+    if change.new_chat_member.status in (ChatMemberStatus.BANNED, ChatMemberStatus.LEFT):
+        logger.info("Користувач %s заблокував бота — відписую", change.chat.id)
+        await asyncio.to_thread(db.update_subscription, change.chat.id, False)
+
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.error("Помилка під час обробки оновлення", exc_info=context.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text("⚠️ Сталася помилка. Спробуйте пізніше.")
+        except TelegramError as e:
+            logger.warning("Не вдалося повідомити користувача про помилку: %s", e)
+
+
+# ---------- Запуск ----------
+
+async def post_init(app: Application) -> None:
+    # Без БД бот працювати не може: якщо тут впаде, процес завершиться,
+    # і хостинг його перезапустить
+    await asyncio.to_thread(db.init_db)
+    state = await asyncio.to_thread(db.get_light_state)
+
+    checker = LightChecker()
+    tracker = StateTracker.from_dict(state)
+    app.bot_data["checker"] = checker
+    app.bot_data["tracker"] = tracker
+    app.bot_data["monitor_task"] = asyncio.create_task(
+        broadcaster.monitor_loop(app.bot, checker, tracker), name="light-monitor"
+    )
+    app.bot_data["announcement_task"] = asyncio.create_task(
+        broadcaster.announcement_job(
+            app.bot, announcement.ANNOUNCEMENT_ID, announcement.SEND_AT,
+            announcement.DEADLINE, announcement.TEXT,
+        ),
+        name="announcement",
+    )
+
+    try:
+        await app.bot.set_my_commands(DEFAULT_COMMANDS)
+    except TelegramError as e:
+        logger.warning("Не вдалося встановити меню команд: %s", e)
+
+
+async def post_stop(app: Application) -> None:
+    for name in ("monitor_task", "announcement_task"):
+        task = app.bot_data.pop(name, None)
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+
+def register_handlers(app: Application) -> None:
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("check", check))
+    app.add_handler(CommandHandler("subscribe", subscribe))
+    app.add_handler(CommandHandler("unsubscribe", unsubscribe))
+
+    app.add_handler(MessageHandler(filters.Text([BTN_SUBSCRIBE]), subscribe))
+    app.add_handler(MessageHandler(filters.Text([BTN_UNSUBSCRIBE]), unsubscribe))
+    app.add_handler(MessageHandler(filters.Text([BTN_CHECK]), check))
+    app.add_handler(MessageHandler(filters.Text([BTN_INFO]), info))
+
+    app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+
+    # Останнім: усе інше в приватному чаті (текст, стікери, невідомі команди)
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE, show_menu))
+
+    app.add_error_handler(error_handler)
+
+
+def build_application() -> Application:
+    app = (
+        ApplicationBuilder()
+        .token(config.TELEGRAM_TOKEN)
+        .concurrent_updates(True)
+        .post_init(post_init)
+        .post_stop(post_stop)
+        .build()
+    )
+    register_handlers(app)
+    return app
+
 
 def main() -> None:
-    """Запуск бота"""
-    application = Application.builder().token(TELEGRAM_TOKEN).post_init(set_bot_menu).build()
+    config.validate()
+    logging.basicConfig(
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        level=logging.INFO,
+    )
+    # httpx на рівні INFO пише кожен URL запиту, а в ньому — токен бота
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
-    # Додаємо обробники
-    application.add_handler(CommandHandler("start", send_welcome_message))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("check", check_command))
-    application.add_handler(CommandHandler("subscribe", subscribe_command))
-    application.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
-    
-    # Важливо: ChatMemberHandler має бути доданий першим
-    application.add_handler(ChatMemberHandler(chat_member_handler, ChatMemberHandler.MY_CHAT_MEMBER))
-    
-    # Обробник всіх текстових повідомлень
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
-    
-    # Додатковий обробник для збереження клавіатури
-    async def keep_keyboard(update: Update, context: CallbackContext):
-        """Зберігає клавіатуру після будь-якого повідомлення"""
-        if update.message and update.effective_user:
-            telegram_id = update.effective_user.id
-            # Якщо це не текст або команда - показуємо клавіатуру
-            if not update.message.text or update.message.text.startswith('/'):
-                keyboard = get_cached_keyboard(telegram_id)
-                reply_markup = ReplyKeyboardMarkup(
-                    keyboard, 
-                    resize_keyboard=True, 
-                    one_time_keyboard=False,
-                    selective=True
-                )
-                await update.message.reply_text(
-                    "Оберіть дію з клавіатури:",
-                    reply_markup=reply_markup
-                )
-    
-    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, keep_keyboard), group=1)
+    app = build_application()
+    logger.info("🤖 Бот запущено")
+    app.run_polling(allowed_updates=[Update.MESSAGE, Update.MY_CHAT_MEMBER])
 
-    print("🤖 Бот запущено...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
