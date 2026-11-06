@@ -1,401 +1,325 @@
-import requests
-import time
+"""Отримання стану світла з Shelly Cloud і логіка підтвердження змін стану.
+
+Ключова ідея: «пристрій офлайн» і «не вдалося отримати дані» — різні речі.
+Shelly живиться від мережі, тому коли світла немає, він зникає з мережі —
+це надійна ознака відключення. А помилка мережі чи Shelly Cloud означає лише,
+що стан невідомий, і не повинна породжувати сповіщень.
+"""
 import logging
-import json
-import os
-from datetime import datetime, timedelta
+import threading
+import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
+
+import requests
+
 from config import SHELLY_AUTH_KEY, SHELLY_BASE_URL, TARGET_MAC, TIMEZONE
 
 logger = logging.getLogger(__name__)
 
-# Константи
-MIN_VOLTAGE = 100  # Мінімальна напруга для вважання що світло є
-MAX_RETRY_ATTEMPTS = 5
-INITIAL_RETRY_DELAY = 2  # сек
-MAX_RETRY_DELAY = 30  # сек
-REQUEST_TIMEOUT = 15  # сек
-OUTAGE_START_FILE = "/tmp/homelight_outage_start.json"
-
-# Глобальний стан для зворотної сумісності
-_outage_start_time = None
-_current_state = {}  # Для get_current_state/set_current_state
-_last_alert_sent = False  # Додаємо прапорець для відстеження вже відправленого алерту
+MIN_VOLTAGE = 100          # В; нижче — вважаємо, що світла немає
+INITIAL_RETRY_DELAY = 2    # с
+MAX_RETRY_DELAY = 30       # с
+CONFIRMATIONS = 2          # скільки читань поспіль потрібно, щоб підтвердити зміну стану
+FUTURE_TOLERANCE = 120     # с; час пристрою «з майбутнього» вважаємо недостовірним
 
 
-def get_outage_start_time() -> int | None:
-    """Отримати час початку відключення"""
-    global _outage_start_time
-    if _outage_start_time is None:
-        _outage_start_time = load_outage_start_time()
-    return _outage_start_time
+class ShellyApiError(RuntimeError):
+    """Не вдалося отримати дані з Shelly Cloud."""
 
 
-def set_outage_start_time(timestamp: int | None) -> None:
-    """Встановити час початку відключення"""
-    global _outage_start_time, _last_alert_sent
-    _outage_start_time = timestamp
-    save_outage_start_time(timestamp)
-    
-    # Скидаємо прапорець алерту при зміні стану відключення
-    if timestamp is None:
-        _last_alert_sent = False
-    
-    if timestamp:
-        logger.info(f"Час початку відключення встановлено: {timestamp}")
-    else:
-        logger.info("Час початку відключення скинуто")
+@dataclass(frozen=True)
+class Reading:
+    """Одне читання стану з Shelly Cloud."""
+    has_light: bool | None          # None — стан невідомий (помилка API)
+    fetched_at: int                 # коли отримано дані (unix time)
+    voltage: float | None = None
+    frequency: float | None = None
+    online: bool | None = None
+    device_time: int | None = None  # коли пристрій востаннє оновлював дані, якщо відомо
+    error: str | None = None
+
+    @property
+    def known(self) -> bool:
+        return self.has_light is not None
 
 
-def load_outage_start_time() -> int | None:
-    """Завантажити час початку відключення з файлу"""
+def _to_float(value) -> float | None:
     try:
-        if os.path.exists(OUTAGE_START_FILE):
-            with open(OUTAGE_START_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                timestamp = data.get("outage_start")
-                if timestamp:
-                    logger.debug(f"Час початку відключення завантажено: {timestamp}")
-                    return timestamp
-    except Exception as e:
-        logger.exception(f"Помилка при завантаженні часу відключення: {e}")
-    return None
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
-def save_outage_start_time(timestamp: int | None) -> None:
-    """Зберегти час початку відключення у файл"""
+def _parse_updated(value, now: int) -> int | None:
+    """Розбирає поле `_updated` Shelly Cloud ("YYYY-MM-DD HH:MM:SS", UTC)."""
+    if not value:
+        return None
     try:
-        data = {"outage_start": timestamp}
-        with open(OUTAGE_START_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        logger.debug(f"Час початку відключення збережено: {timestamp}")
-    except Exception as e:
-        logger.exception(f"Помилка при збереженні часу відключення: {e}")
+        dt = datetime.strptime(str(value)[:19], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    ts = int(dt.replace(tzinfo=timezone.utc).timestamp())
+    return ts if ts <= now + FUTURE_TOLERANCE else None
 
 
-# Функції для зворотної сумісності з broadcaster.py
-def get_current_state() -> dict:
-    """Отримати поточний стан (для зворотної сумісності)"""
-    global _current_state
-    return _current_state
-
-
-def set_current_state(state: dict) -> None:
-    """Зберегти поточний стан (для зворотної сумісності)"""
-    global _current_state
-    _current_state = state
+def _extract_switch_data(device: dict) -> tuple[float | None, float | None]:
+    """Напруга й частота з першого компонента switch* пристрою."""
+    for key, value in device.items():
+        if str(key).startswith("switch") and isinstance(value, dict):
+            return _to_float(value.get("voltage")), _to_float(value.get("freq"))
+    return None, None
 
 
 class LightChecker:
-    def __init__(self):
-        self.auth_key = SHELLY_AUTH_KEY
-        self.base_url = SHELLY_BASE_URL
-        self.target_mac = TARGET_MAC
+    def __init__(self, auth_key=SHELLY_AUTH_KEY, base_url=SHELLY_BASE_URL,
+                 target_mac=TARGET_MAC, session=None):
+        self.auth_key = auth_key
+        self.base_url = base_url
+        self.target_mac = target_mac
+        self._session = session or requests.Session()
+        self._lock = threading.Lock()
+        self._last: Reading | None = None
 
-    def fetch_all_status(self, max_retries=MAX_RETRY_ATTEMPTS):
-        """Отримання статусу всіх пристроїв з Shelly Cloud"""
+    def fetch_all_status(self, attempts: int = 3, timeout: float = 10) -> dict:
+        """Запит /device/all_status з повторами. Кидає ShellyApiError."""
         url = f"{self.base_url}/device/all_status"
-        payload = {"auth_key": self.auth_key}
-
         delay = INITIAL_RETRY_DELAY
-        for attempt in range(1, max_retries + 1):
+        last_error = "невідома помилка"
+
+        for attempt in range(1, attempts + 1):
             try:
-                logger.info(f"Спроба {attempt}/{max_retries} отримати дані з Shelly API...")
-                r = requests.post(url, data=payload, timeout=REQUEST_TIMEOUT)
-
-                if r.status_code == 429:
-                    logger.warning(f"429 Too many requests. Чекаю {delay}s...")
-                    time.sleep(delay)
-                    delay = min(delay * 2, MAX_RETRY_DELAY)
-                    continue
-
-                if r.status_code != 200:
-                    logger.error(f"HTTP помилка: {r.status_code}, тіло: {r.text[:300]}")
-                    r.raise_for_status()
-
-                j = r.json()
-                if not j.get("isok"):
-                    error_msg = j.get("error", "Unknown API error")
-                    raise RuntimeError(f"Shelly API помилка: {error_msg}")
-
-                logger.info("Дані з Shelly API успішно отримано")
-                return j["data"]
-
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Помилка запиту: {e}")
-                if attempt < max_retries:
-                    logger.info(f"Повторна спроба через {delay} сек...")
-                    time.sleep(delay)
-                    delay = min(delay * 2, MAX_RETRY_DELAY)
+                response = self._session.post(
+                    url, data={"auth_key": self.auth_key}, timeout=timeout
+                )
+                if response.status_code == 429:
+                    last_error = "HTTP 429 (ліміт запитів)"
                 else:
-                    raise RuntimeError(f"Не вдалося отримати дані")
+                    response.raise_for_status()
+                    payload = response.json()
+                    if payload.get("isok"):
+                        return payload.get("data") or {}
+                    errors = payload.get("errors") or payload.get("error") or "Unknown API error"
+                    if "max_req" not in str(errors):
+                        raise ShellyApiError(f"Shelly API помилка: {errors}")
+                    last_error = f"ліміт запитів Shelly: {errors}"
+            except requests.RequestException as e:
+                last_error = f"{type(e).__name__}: {e}"
 
-        raise RuntimeError("Не вдалося отримати дані")
+            logger.warning("Shelly: спроба %d/%d невдала: %s", attempt, attempts, last_error)
+            if attempt < attempts:
+                time.sleep(delay)
+                delay = min(delay * 2, MAX_RETRY_DELAY)
 
-    def pick_device(self, data: dict):
-        """Вибір цільового пристрою з отриманих даних"""
-        devices_status = data.get("devices_status", {})
-        
-        if not devices_status:
-            raise RuntimeError("Немає пристроїв")
+        raise ShellyApiError(f"Не вдалося отримати дані з Shelly: {last_error}")
 
-        # Якщо вказано конкретний MAC
+    def _find_device(self, devices: dict) -> dict | None:
         if self.target_mac:
-            for mac in [self.target_mac.lower(), self.target_mac.upper(), self.target_mac]:
-                if mac in devices_status:
-                    logger.info(f"Знайдено пристрій: {mac}")
-                    return mac, devices_status[mac]
+            wanted = self.target_mac.lower()
+            for mac, status in devices.items():
+                if str(mac).lower() == wanted and isinstance(status, dict):
+                    return status
+            return None
+        return next((s for s in devices.values() if isinstance(s, dict)), None)
 
-            logger.warning(f"Не знайдено пристрій з MAC: {self.target_mac}")
-            raise RuntimeError("Пристрій не знайдено")
+    def parse_reading(self, data: dict, now: int) -> Reading:
+        """Перетворює відповідь Shelly Cloud на Reading (без мережевих запитів)."""
+        devices = data.get("devices_status") or {}
+        device = self._find_device(devices) if isinstance(devices, dict) else None
 
-        # Беремо перший пристрій
-        first_mac = next(iter(devices_status.keys()))
-        logger.info(f"Використовується пристрій: {first_mac}")
-        return first_mac, devices_status[first_mac]
+        if device is None:
+            logger.info("Пристрою %s немає у відповіді Shelly Cloud — вважаю його офлайн",
+                        self.target_mac or "(перший)")
+            return Reading(has_light=False, fetched_at=now, online=False)
 
-    def _extract_switch_data(self, device_data: dict) -> tuple:
-        """Витяг даних про напругу з пристрою"""
-        voltage = None
-        frequency = None
+        device_time = _parse_updated(device.get("_updated"), now)
+        dev_info = device.get("_dev_info")
+        if isinstance(dev_info, dict) and dev_info.get("online") is False:
+            logger.info("Shelly Cloud повідомляє, що пристрій офлайн")
+            return Reading(has_light=False, fetched_at=now, online=False, device_time=device_time)
 
-        for key, value in device_data.items():
-            if key.startswith('switch') and isinstance(value, dict):
-                voltage = value.get('voltage')
-                frequency = value.get('freq')
-                break
-
-        return voltage, frequency
-
-    def _determine_has_light(self, voltage) -> bool:
-        """Визначення наявності світла на основі напруги"""
+        voltage, frequency = _extract_switch_data(device)
         if voltage is None:
-            logger.warning("Не вдалося отримати напругу")
-            return False
+            logger.warning("Пристрій онлайн, але не передав напругу")
+            return Reading(has_light=None, fetched_at=now, online=True, device_time=device_time,
+                           error="Пристрій не передав напругу")
 
-        if voltage > MIN_VOLTAGE:
-            logger.info(f"Напруга {voltage} В - світло Є")
-            return True
-        else:
-            logger.info(f"Напруга {voltage} В - світла НЕМАЄ")
-            return False
+        has_light = voltage > MIN_VOLTAGE
+        logger.info("Напруга %.1f В — світло %s", voltage, "Є" if has_light else "НЕМАЄ")
+        return Reading(has_light=has_light, fetched_at=now, voltage=voltage,
+                       frequency=frequency, online=True, device_time=device_time)
 
-    def get_device_status(self):
-        """Отримання статусу пристрою"""
-        logger.info("Перевірка статусу")
+    def get_reading(self, max_age: float = 0, attempts: int = 3, timeout: float = 10) -> Reading:
+        """Поточне читання. Блокуючий виклик — з async-коду через asyncio.to_thread.
 
-        try:
-            # Отримуємо дані
-            data = self.fetch_all_status()
-            
-            # Перевіряємо чи є пристрої
-            if "devices_status" not in data:
-                logger.error("Немає даних про пристрої")
-                return {
-                    "has_light": False,
-                    "voltage": None,
-                    "last_update_time": int(time.time())
-                }
-            
-            # Вибираємо пристрій
-            mac, device_data = self.pick_device(data)
-            
-            # Аналізуємо дані
-            current_time = int(time.time())
-            voltage, frequency = self._extract_switch_data(device_data)
-            has_light = self._determine_has_light(voltage)
-            
-            return {
-                "has_light": has_light,
-                "voltage": voltage,
-                "frequency": frequency,
-                "last_update_time": current_time
-            }
-
-        except Exception as e:
-            logger.error(f"Помилка: {e}")
-            # Якщо будь-яка помилка - світла немає
-            return {
-                "has_light": False,
-                "voltage": None,
-                "last_update_time": int(time.time())
-            }
-
-    # Метод для зворотної сумісності з broadcaster.py
-    def get_real_device_status(self):
-        """Альтернативна назва для get_device_status (для зворотної сумісності)"""
-        return self.get_device_status()
-
-    def get_last_update_time(self, timestamp: int) -> str:
-        """Отримує час останнього оновлення"""
-        if not timestamp or timestamp == 0:
-            return ""
-
-        try:
-            tz = ZoneInfo(TIMEZONE)
-            dt = datetime.fromtimestamp(timestamp)
-            dt_local = dt.astimezone(tz)
-            now_dt = datetime.now(tz)
-        except Exception:
-            dt_local = datetime.fromtimestamp(timestamp)
-            now_dt = datetime.now()
-
-        diff = now_dt - dt_local
-        diff_seconds = int(diff.total_seconds())
-
-        # Форматуємо дату
-        if dt_local.date() == now_dt.date():
-            time_str = dt_local.strftime("сьогодні о %H:%M")
-        elif dt_local.date() == (now_dt - timedelta(days=1)).date():
-            time_str = dt_local.strftime("вчора о %H:%M")
-        else:
-            time_str = dt_local.strftime("%d.%m о %H:%M")
-
-        # Додаємо скільки часу тому
-        if diff_seconds < 60:
-            ago = "щойно"
-        elif diff_seconds < 3600:
-            minutes = diff_seconds // 60
-            ago = f"{minutes} хв тому"
-        elif diff_seconds < 86400:
-            hours = diff_seconds // 3600
-            minutes = (diff_seconds % 3600) // 60
-            ago = f"{hours} год {minutes} хв тому"
-        else:
-            days = diff_seconds // 86400
-            ago = f"{days} дн тому"
-
-        return f"🕒 {time_str} ({ago})"
-
-    def format_duration(self, seconds: int) -> str:
-        """Форматує тривалість у зрозумілий формат"""
-        if seconds < 60:
-            return f"{seconds} секунд"
-        elif seconds < 3600:
-            minutes = seconds // 60
-            secs = seconds % 60
-            return f"{minutes} хв {secs} сек"
-        elif seconds < 86400:
-            hours = seconds // 3600
-            minutes = (seconds % 3600) // 60
-            return f"{hours} год {minutes} хв"
-        else:
-            days = seconds // 86400
-            hours = (seconds % 86400) // 3600
-            return f"{days} дн {hours} год"
-
-    def check_light_status(self) -> str:
-        """Основна функція для перевірки статусу світла (для кнопки check)"""
-        logger.info("Перевірка світла")
-
-        status = self.get_device_status()
-        last_update_time = status.get("last_update_time", 0)
-        time_info = self.get_last_update_time(last_update_time)
-
-        # Отримуємо дані
-        voltage = status.get("voltage")
-        frequency = status.get("frequency")
-        has_light = status.get("has_light")
-
-        # Отримуємо поточний час
-        current_time = int(time.time())
-        
-        # Отримуємо час початку відключення
-        outage_start = get_outage_start_time()
-        
-        # Перевіряємо чи є світло
-        if has_light:
-            # Світло Є
-            
-            # Формуємо деталі
-            voltage_display = f"{voltage:.1f} В" if voltage is not None else "–"
-            frequency_display = f"{frequency:.1f} Гц" if frequency is not None else "–"
-            
-            details = f"🔌 Напруга: {voltage_display}\n〰️  Частота: {frequency_display}"
-            
-            # Додаємо інформацію про час
-            if time_info:
-                details += f"\n{time_info}"
-            
-            # Перевіряємо чи було відключення
-            outage_duration_info = ""
-            if outage_start:
-                outage_duration = current_time - outage_start
-                if outage_duration > 60:
-                    duration_str = self.format_duration(outage_duration)
-                    outage_duration_info = f"\n\n💡 Світла не було: {duration_str}"
-                
-                # Скидаємо час початку відключення
-                set_outage_start_time(None)
-            
-            result = f"✅ СВІТЛО Є\n\n{details}{outage_duration_info}"
-                
-        else:
-            # Світла НЕМАЄ
-            current_time = int(time.time())
-            
-            if outage_start is None:
-                # Перше повідомлення про відключення
-                set_outage_start_time(current_time)
-                outage_duration_info = ""
-            else:
-                # Відключення триває
-                outage_duration = current_time - outage_start
-                duration_str = self.format_duration(outage_duration)
-                outage_duration_info = f"⏱️ Час відключення: {duration_str}\n"
-            
-            # Формуємо повідомлення
-            if time_info:
-                result = f"❌ СВІТЛА НЕМАЄ\n\n{outage_duration_info}{time_info}"
-            else:
-                result = f"❌ СВІТЛА НЕМАЄ\n\n{outage_duration_info}".strip()
-
-        return result
-
-    def check_for_alerts(self) -> str | None:
+        max_age > 0 дозволяє повернути збережене читання, якщо воно не старше
+        за max_age секунд. Lock гарантує, що одночасно йде лише один запит до
+        Shelly Cloud (у нього жорсткий ліміт запитів).
+        Ніколи не кидає винятків: при будь-якій помилці повертає has_light=None.
         """
-        Перевіряє статус світла та повертає повідомлення тільки при зміні стану.
-        Повертає повідомлення лише двічі:
-        1. Коли світло пропало (перший раз)
-        2. Коли світло повернулося
-        """
-        logger.info("Перевірка для алертів")
+        with self._lock:
+            cached = self._last
+            if max_age > 0 and cached is not None and time.time() - cached.fetched_at <= max_age:
+                return cached
+            try:
+                data = self.fetch_all_status(attempts=attempts, timeout=timeout)
+                reading = self.parse_reading(data, int(time.time()))
+            except Exception as e:
+                logger.error("Не вдалося отримати стан світла: %s", e)
+                return Reading(has_light=None, fetched_at=int(time.time()), error=str(e))
+            if reading.known:
+                self._last = reading
+            return reading
 
-        status = self.get_device_status()
-        
-        has_light = status.get("has_light")
-        
-        current_time = int(time.time())
-        outage_start = get_outage_start_time()
-        
-        # Додаємо глобальну змінну для відстеження вже відправленого алерту
-        global _last_alert_sent
-        
-        # Перевіряємо зміну стану
-        if has_light:
-            # Світло Є
-            if outage_start is not None:
-                # Світло повернулося після відключення
-                outage_duration = current_time - outage_start
-                duration_str = self.format_duration(outage_duration)
-                
-                # Скидаємо час початку відключення та прапорець
-                set_outage_start_time(None)
-                _last_alert_sent = False
-                
-                return f"🟢 СВІТЛО ПОВЕРНУЛОСЬ!\n\n⏱️ Час відключення: {duration_str}"
-        
-        else:
-            # Світла НЕМАЄ
-            if outage_start is None:
-                # Перший раз, коли світло пропало
-                set_outage_start_time(current_time)
-                _last_alert_sent = True  # Встановлюємо, що алерт вже відправлено
-                return "🔴 СВІТЛО ПРОПАЛО!"
-            elif not _last_alert_sent:
-                # Цей блок більше не викликається, лишаємо для зворотної сумісності
-                _last_alert_sent = True
-                return "🔴 СВІТЛО ПРОПАЛО!"
-        
-        # Якщо стан не змінився - НЕ відправляємо повторних повідомлень
-        return None
+
+@dataclass(frozen=True)
+class StateChange:
+    has_light: bool
+    since: int
+    previous_duration: int | None = None  # скільки тривав попередній стан
+    initial: bool = False                 # перша ініціалізація стану — без сповіщення
+
+
+class StateTracker:
+    """Підтверджений стан світла. Чиста логіка, без мережі й БД.
+
+    Зміна стану підтверджується лише після `confirmations` читань поспіль,
+    що відрізняються від поточного стану. Невідомі читання (None) ігноруються.
+    """
+
+    def __init__(self, has_light: bool | None = None, since: int | None = None,
+                 confirmations: int = CONFIRMATIONS):
+        if confirmations < 1:
+            raise ValueError("confirmations must be >= 1")
+        self.has_light = has_light
+        self.since = since
+        self.confirmations = confirmations
+        self._pending_count = 0
+        self._pending_since: int | None = None
+
+    @property
+    def known(self) -> bool:
+        return self.has_light is not None
+
+    @property
+    def pending(self) -> bool:
+        """Є непідтверджена зміна стану."""
+        return self._pending_count > 0
+
+    def _reset_pending(self) -> None:
+        self._pending_count = 0
+        self._pending_since = None
+
+    def observe(self, has_light: bool | None, now: int) -> StateChange | None:
+        if has_light is None:
+            return None
+
+        if self.has_light is None:
+            self.has_light, self.since = has_light, now
+            self._reset_pending()
+            return StateChange(has_light=has_light, since=now, initial=True)
+
+        if has_light == self.has_light:
+            self._reset_pending()
+            return None
+
+        if self._pending_count == 0:
+            self._pending_since = now
+        self._pending_count += 1
+        if self._pending_count < self.confirmations:
+            return None
+
+        started = self._pending_since
+        previous_duration = started - self.since if self.since is not None else None
+        self.has_light, self.since = has_light, started
+        self._reset_pending()
+        return StateChange(has_light=has_light, since=started, previous_duration=previous_duration)
+
+
+# ---------- Форматування повідомлень ----------
+
+def _tz():
+    try:
+        return ZoneInfo(TIMEZONE)
+    except Exception:
+        logger.warning("Невідома таймзона %s, використовую UTC", TIMEZONE)
+        return timezone.utc
+
+
+def format_duration(seconds: int) -> str:
+    """Тривалість у зрозумілому форматі."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds} сек"
+    if seconds < 3600:
+        return f"{seconds // 60} хв {seconds % 60} сек"
+    if seconds < 86400:
+        return f"{seconds // 3600} год {(seconds % 3600) // 60} хв"
+    return f"{seconds // 86400} дн {(seconds % 86400) // 3600} год"
+
+
+def format_moment(timestamp: int, now: int) -> str:
+    """«сьогодні о 14:05», «вчора о 23:10» або «05.11 о 08:00»."""
+    tz = _tz()
+    dt = datetime.fromtimestamp(timestamp, tz)
+    today = datetime.fromtimestamp(now, tz).date()
+    if dt.date() == today:
+        return dt.strftime("сьогодні о %H:%M")
+    if dt.date() == today - timedelta(days=1):
+        return dt.strftime("вчора о %H:%M")
+    return dt.strftime("%d.%m о %H:%M")
+
+
+def format_ago(seconds: int) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return "щойно"
+    if seconds < 3600:
+        return f"{seconds // 60} хв тому"
+    if seconds < 86400:
+        return f"{seconds // 3600} год {(seconds % 3600) // 60} хв тому"
+    return f"{seconds // 86400} дн тому"
+
+
+def format_time(timestamp: int, now: int) -> str:
+    return f"{format_moment(timestamp, now)} ({format_ago(now - timestamp)})"
+
+
+def format_status_message(reading: Reading, tracker: StateTracker, now: int) -> str:
+    """Відповідь на кнопку «Перевірити». Стан не змінює."""
+    if not reading.known:
+        lines = ["⚠️ Не вдалося отримати дані від Shelly. Спробуйте пізніше."]
+        if tracker.known and tracker.since is not None:
+            state = "світло є" if tracker.has_light else "світла немає"
+            lines.append(f"\nОстанній відомий стан: {state} з {format_moment(tracker.since, now)}.")
+        return "\n".join(lines)
+
+    confirmed = (tracker.known and tracker.since is not None
+                 and tracker.has_light == reading.has_light)
+    voltage = f"{reading.voltage:.1f} В" if reading.voltage is not None else "–"
+    frequency = f"{reading.frequency:.1f} Гц" if reading.frequency is not None else "–"
+
+    if reading.has_light:
+        lines = ["✅ СВІТЛО Є", "", f"🔌 Напруга: {voltage}", f"〰️  Частота: {frequency}"]
+        if confirmed:
+            lines.append(f"⏱️ Світло є вже: {format_duration(now - tracker.since)}")
+    else:
+        lines = ["❌ СВІТЛА НЕМАЄ", ""]
+        if confirmed:
+            lines.append(f"⏱️ Час відключення: {format_duration(now - tracker.since)}")
+        if reading.voltage is not None:
+            lines.append(f"🔌 Напруга: {voltage}")
+
+    lines.append(f"🕒 Дані: {format_time(reading.device_time or reading.fetched_at, now)}")
+    return "\n".join(lines)
+
+
+def format_alert(change: StateChange) -> str:
+    """Текст сповіщення для підписників."""
+    if change.has_light:
+        message = "🟢 СВІТЛО ПОВЕРНУЛОСЬ!"
+        if change.previous_duration is not None:
+            message += f"\n\n⏱️ Час відключення: {format_duration(change.previous_duration)}"
+        return message
+    return "🔴 СВІТЛО ПРОПАЛО!"

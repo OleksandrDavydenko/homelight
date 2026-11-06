@@ -1,105 +1,169 @@
-import psycopg2
-import os
-import logging
+"""Робота з PostgreSQL: користувачі та підтверджений стан світла.
 
-# Отримуємо URL підключення до бази даних із змінної середовища
-DATABASE_URL = os.getenv('DATABASE_URL')
+Функції синхронні (psycopg2), тому з асинхронного коду їх викликають через
+asyncio.to_thread. Помилки не ковтаються: їх обробляє той, хто викликає.
+"""
+import contextlib
+import logging
+import os
+import threading
+
+import psycopg2
+import psycopg2.pool
+
+from config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
 
+DB_SSLMODE = os.getenv("DB_SSLMODE", "require")
+POOL_MAX_CONNECTIONS = 5
 
-def connect_db():
-    """Функція для підключення до бази даних. Перевіряє наявність DATABASE_URL."""
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is not set in environment")
-    return psycopg2.connect(DATABASE_URL, sslmode='require')
+_CONNECTION_ERRORS = (psycopg2.OperationalError, psycopg2.InterfaceError)
+
+_pool = None
+_pool_lock = threading.Lock()
+# ThreadedConnectionPool не чекає на вільне з'єднання, а одразу кидає PoolError,
+# тому обмежуємо кількість одночасних запитів семафором — зайві чекають у черзі
+_slots = threading.BoundedSemaphore(POOL_MAX_CONNECTIONS)
 
 
-def create_table():
-    """Створення таблиці користувачів у базі даних"""
-    try:
-        with connect_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS usersLightBot (
-                        id SERIAL PRIMARY KEY,
-                        telegram_id BIGINT UNIQUE NOT NULL,
-                        first_name VARCHAR(100),
-                        subscribed BOOLEAN DEFAULT FALSE
-                    );
-                """)
+def _get_pool():
+    global _pool
+    with _pool_lock:
+        if _pool is None:
+            if not DATABASE_URL:
+                raise RuntimeError("DATABASE_URL is not set in environment")
+            _pool = psycopg2.pool.ThreadedConnectionPool(
+                1, POOL_MAX_CONNECTIONS, DATABASE_URL, sslmode=DB_SSLMODE
+            )
+        return _pool
+
+
+@contextlib.contextmanager
+def _connection():
+    """Бере з'єднання з пулу, комітить або відкочує транзакцію й повертає його."""
+    pool = _get_pool()
+    with _slots:
+        conn = pool.getconn()
+        broken = False
+        try:
+            yield conn
             conn.commit()
-    except Exception as e:
-        logger.exception("Error creating table: %s", e)
+        except _CONNECTION_ERRORS:
+            broken = True
+            raise
+        except BaseException:
+            try:
+                conn.rollback()
+            except _CONNECTION_ERRORS:
+                broken = True
+            raise
+        finally:
+            pool.putconn(conn, close=broken or bool(conn.closed))
 
 
-def add_user(telegram_id, first_name, subscribed=False):
-    """Додаємо користувача в таблицю або оновлюємо його підписку"""
-    logger.info("add_user called: telegram_id=%s subscribed=%s", telegram_id, subscribed)
-    try:
-        with connect_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    INSERT INTO usersLightBot (telegram_id, first_name, subscribed)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (telegram_id) DO UPDATE SET subscribed = %s, first_name = %s;
-                """, (telegram_id, first_name, subscribed, subscribed, first_name))
-            conn.commit()
-        logger.info("add_user succeeded: telegram_id=%s subscribed=%s", telegram_id, subscribed)
-    except Exception as e:
-        logger.exception("add_user failed for telegram_id=%s: %s", telegram_id, e)
+def _run(fn):
+    """Виконує fn(cursor) в окремій транзакції.
+
+    Якщо з'єднання з пулу виявилося розірваним (сервер закриває неактивні
+    з'єднання), запит повторюється один раз на новому з'єднанні. Усі запити
+    модуля ідемпотентні, тож повтор безпечний.
+    """
+    for attempt in (1, 2):
+        try:
+            with _connection() as conn, conn.cursor() as cursor:
+                return fn(cursor)
+        except _CONNECTION_ERRORS:
+            if attempt == 2:
+                raise
+            logger.warning("З'єднання з БД розірване, повторюю запит")
 
 
-def update_subscription(telegram_id, subscribed):
-    """Оновлюємо підписку користувача"""
-    logger.info("update_subscription called: telegram_id=%s -> subscribed=%s", telegram_id, subscribed)
-    try:
-        with connect_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    UPDATE usersLightBot
-                    SET subscribed = %s
-                    WHERE telegram_id = %s;
-                """, (subscribed, telegram_id))
-            conn.commit()
-        logger.info("update_subscription succeeded: telegram_id=%s -> subscribed=%s", telegram_id, subscribed)
-    except Exception as e:
-        logger.exception("update_subscription failed for telegram_id=%s: %s", telegram_id, e)
+def init_db() -> None:
+    """Створює таблиці, якщо їх ще немає."""
+    def query(cursor):
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS usersLightBot (
+                id SERIAL PRIMARY KEY,
+                telegram_id BIGINT UNIQUE NOT NULL,
+                first_name VARCHAR(100),
+                subscribed BOOLEAN DEFAULT FALSE
+            );
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS light_state (
+                id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+                has_light BOOLEAN NOT NULL,
+                since BIGINT NOT NULL
+            );
+        """)
+    _run(query)
+    logger.info("Таблиці БД готові")
 
 
-def get_user_subscription(telegram_id):
-    """Отримуємо підписку користувача"""
-    logger.debug("get_user_subscription called for %s", telegram_id)
-    try:
-        with connect_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    SELECT subscribed FROM usersLightBot WHERE telegram_id = %s;
-                """, (telegram_id,))
-                result = cursor.fetchone()
-        if result:
-            logger.debug("get_user_subscription result for %s: %s", telegram_id, result[0])
-            return result[0]
-        logger.debug("get_user_subscription result for %s: None", telegram_id)
-        return None
-    except Exception as e:
-        logger.exception("get_user_subscription failed for %s: %s", telegram_id, e)
-        return None
+def ensure_user(telegram_id: int, first_name: str) -> None:
+    """Додає користувача, якщо його немає. Підписку існуючого користувача не змінює."""
+    _run(lambda cursor: cursor.execute("""
+        INSERT INTO usersLightBot (telegram_id, first_name, subscribed)
+        VALUES (%s, %s, FALSE)
+        ON CONFLICT (telegram_id) DO UPDATE SET first_name = EXCLUDED.first_name;
+    """, (telegram_id, first_name[:100])))
 
 
-def get_all_subscribed_users():
-    """Повертає список telegram_id всіх користувачів зі значенням subscribed = TRUE"""
-    logger.debug("get_all_subscribed_users called")
-    try:
-        with connect_db() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("""
-                    SELECT telegram_id FROM usersLightBot WHERE subscribed = TRUE;
-                """)
-                rows = cursor.fetchall()
-        user_ids = [row[0] for row in rows]
-        logger.debug("get_all_subscribed_users found %d users", len(user_ids))
-        return user_ids
-    except Exception as e:
-        logger.exception("get_all_subscribed_users failed: %s", e)
-        return []
+def set_subscription(telegram_id: int, first_name: str, subscribed: bool) -> None:
+    """Додає користувача (якщо треба) і встановлює підписку."""
+    _run(lambda cursor: cursor.execute("""
+        INSERT INTO usersLightBot (telegram_id, first_name, subscribed)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (telegram_id) DO UPDATE
+            SET subscribed = EXCLUDED.subscribed, first_name = EXCLUDED.first_name;
+    """, (telegram_id, first_name[:100], subscribed)))
+    logger.info("Підписка %s -> %s", telegram_id, subscribed)
+
+
+def update_subscription(telegram_id: int, subscribed: bool) -> None:
+    """Змінює підписку існуючого користувача (наприклад, коли він заблокував бота)."""
+    _run(lambda cursor: cursor.execute(
+        "UPDATE usersLightBot SET subscribed = %s WHERE telegram_id = %s;",
+        (subscribed, telegram_id),
+    ))
+    logger.info("Підписка %s -> %s", telegram_id, subscribed)
+
+
+def get_user_subscription(telegram_id: int) -> bool:
+    """True, якщо користувач підписаний; False, якщо ні або його немає в БД."""
+    def query(cursor):
+        cursor.execute(
+            "SELECT subscribed FROM usersLightBot WHERE telegram_id = %s;",
+            (telegram_id,),
+        )
+        row = cursor.fetchone()
+        return bool(row and row[0])
+    return _run(query)
+
+
+def get_all_subscribed_users() -> list[int]:
+    """telegram_id всіх підписаних користувачів."""
+    def query(cursor):
+        cursor.execute("SELECT telegram_id FROM usersLightBot WHERE subscribed = TRUE;")
+        return [row[0] for row in cursor.fetchall()]
+    return _run(query)
+
+
+def get_light_state() -> tuple[bool, int] | None:
+    """Підтверджений стан світла: (has_light, since) або None, якщо ще не збережено."""
+    def query(cursor):
+        cursor.execute("SELECT has_light, since FROM light_state WHERE id = 1;")
+        row = cursor.fetchone()
+        return (bool(row[0]), int(row[1])) if row else None
+    return _run(query)
+
+
+def save_light_state(has_light: bool, since: int) -> None:
+    """Зберігає підтверджений стан світла."""
+    _run(lambda cursor: cursor.execute("""
+        INSERT INTO light_state (id, has_light, since) VALUES (1, %s, %s)
+        ON CONFLICT (id) DO UPDATE
+            SET has_light = EXCLUDED.has_light, since = EXCLUDED.since;
+    """, (has_light, since)))
+    logger.info("Стан світла збережено: has_light=%s since=%s", has_light, since)
