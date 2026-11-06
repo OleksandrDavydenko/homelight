@@ -29,7 +29,7 @@ class DbTest(unittest.TestCase):
         for p in self._patches:
             p.start()
         with contextlib.closing(self._connect()) as conn, conn, conn.cursor() as cur:
-            cur.execute("DROP TABLE IF EXISTS usersLightBot, light_state, announcements;")
+            cur.execute("DROP TABLE IF EXISTS usersLightBot, light_state;")
         db.init_db()
 
     def _connect(self):
@@ -96,12 +96,13 @@ class DbTest(unittest.TestCase):
         self.assertEqual(db.get_light_state(),
                          {"has_light": True, "since": 77, "offline": False, "light_since": None})
 
-    def test_announcement_is_claimed_only_once(self):
-        self.assertFalse(db.is_announcement_sent("a"))
-        self.assertTrue(db.claim_announcement("a", 100))
-        self.assertFalse(db.claim_announcement("a", 200))
-        self.assertTrue(db.is_announcement_sent("a"))
-        self.assertTrue(db.claim_announcement("b", 300))
+    def test_init_db_drops_old_announcements_table(self):
+        with contextlib.closing(self._connect()) as conn, conn, conn.cursor() as cur:
+            cur.execute("CREATE TABLE announcements (id TEXT PRIMARY KEY, sent_at BIGINT NOT NULL);")
+        db.init_db()
+        with contextlib.closing(self._connect()) as conn, conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('announcements');")
+            self.assertIsNone(cur.fetchone()[0])
 
     def test_more_concurrent_queries_than_pool_size(self):
         db.set_subscription(1, "A", True)
