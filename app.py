@@ -16,7 +16,6 @@ from telegram.ext import (
     filters,
 )
 
-import announcement
 import broadcaster
 import config
 import db
@@ -187,13 +186,6 @@ async def post_init(app: Application) -> None:
     app.bot_data["monitor_task"] = asyncio.create_task(
         broadcaster.monitor_loop(app.bot, checker, tracker), name="light-monitor"
     )
-    app.bot_data["announcement_task"] = asyncio.create_task(
-        broadcaster.announcement_job(
-            app.bot, announcement.ANNOUNCEMENT_ID, announcement.SEND_AT,
-            announcement.DEADLINE, announcement.TEXT,
-        ),
-        name="announcement",
-    )
 
     try:
         await app.bot.set_my_commands(DEFAULT_COMMANDS)
@@ -202,12 +194,11 @@ async def post_init(app: Application) -> None:
 
 
 async def post_stop(app: Application) -> None:
-    for name in ("monitor_task", "announcement_task"):
-        task = app.bot_data.pop(name, None)
-        if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
+    task = app.bot_data.pop("monitor_task", None)
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
 
 
 def register_handlers(app: Application) -> None:

@@ -95,9 +95,6 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             started.set()
             await asyncio.Event().wait()
 
-        async def fake_announcement(bot, announcement_id, send_at, deadline, text):
-            await asyncio.Event().wait()
-
         application = SimpleNamespace(
             bot=SimpleNamespace(set_my_commands=mock.AsyncMock(side_effect=NetworkError("down"))),
             bot_data={},
@@ -105,8 +102,7 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(app.db, "init_db") as init_db, \
                 mock.patch.object(app.db, "get_light_state",
                                   return_value={"has_light": False, "since": 123, "offline": False, "light_since": None}), \
-                mock.patch.object(app.broadcaster, "monitor_loop", fake_monitor), \
-                mock.patch.object(app.broadcaster, "announcement_job", fake_announcement):
+                mock.patch.object(app.broadcaster, "monitor_loop", fake_monitor):
             await app.post_init(application)
             await asyncio.wait_for(started.wait(), 1)
 
@@ -114,9 +110,9 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         tracker = application.bot_data["tracker"]
         self.assertEqual((tracker.has_light, tracker.since), (False, 123))
 
-        tasks = [application.bot_data["monitor_task"], application.bot_data["announcement_task"]]
+        task = application.bot_data["monitor_task"]
         await app.post_stop(application)
-        self.assertTrue(all(task.cancelled() for task in tasks))
+        self.assertTrue(task.cancelled())
 
     def test_build_application_registers_handlers(self):
         with mock.patch.object(app.config, "TELEGRAM_TOKEN", "123:abc"):
