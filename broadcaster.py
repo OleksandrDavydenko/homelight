@@ -12,6 +12,7 @@ from telegram import Bot
 from telegram.error import Forbidden, RetryAfter, TelegramError
 
 import db
+from keyboard import build_keyboard
 from light_checker import LightChecker, StateTracker, format_alert
 
 logger = logging.getLogger(__name__)
@@ -21,11 +22,11 @@ CONFIRM_INTERVAL = 20   # с до повторної перевірки, кол�
 SEND_DELAY = 0.05       # с між повідомленнями (ліміт Telegram ~30 повідомлень/с)
 
 
-async def _send(bot: Bot, user_id: int, text: str) -> bool:
+async def _send(bot: Bot, user_id: int, text: str, reply_markup=None) -> bool:
     """Надсилає повідомлення одному користувачу. True — якщо успішно."""
     for attempt in (1, 2):
         try:
-            await bot.send_message(chat_id=user_id, text=text)
+            await bot.send_message(chat_id=user_id, text=text, reply_markup=reply_markup)
             return True
         except RetryAfter as e:
             if attempt == 2:
@@ -50,9 +51,12 @@ async def notify_subscribers(bot: Bot, message: str) -> int:
     """Розсилає повідомлення всім підписникам. Повертає кількість успішних відправок."""
     user_ids = await asyncio.to_thread(db.get_all_subscribed_users)
     logger.info("Розсилка %d підписникам: %s", len(user_ids), message.splitlines()[0])
+    # Адресати підписані, тож у клавіатурі кнопка «Відписатись».
+    # Заодно повертає клавіатуру тим, у кого вона зникла.
+    keyboard = build_keyboard(True)
     sent = 0
     for user_id in user_ids:
-        if await _send(bot, user_id, message):
+        if await _send(bot, user_id, message, reply_markup=keyboard):
             sent += 1
         await asyncio.sleep(SEND_DELAY)
     logger.info("Розсилку завершено: %d/%d", sent, len(user_ids))

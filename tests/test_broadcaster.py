@@ -12,12 +12,14 @@ class FakeBot:
         # user_id -> список винятків, які кидати при наступних спробах
         self.failures = {uid: list(errs) for uid, errs in (failures or {}).items()}
         self.sent = []
+        self.markups = []
 
-    async def send_message(self, chat_id, text):
+    async def send_message(self, chat_id, text, reply_markup=None):
         errors = self.failures.get(chat_id)
         if errors:
             raise errors.pop(0)
         self.sent.append((chat_id, text))
+        self.markups.append(reply_markup)
 
 
 class FakeChecker:
@@ -38,6 +40,14 @@ class NotifyTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, 2)
         self.assertEqual([uid for uid, _ in bot.sent], [1, 3])
         update.assert_called_once_with(2, False)
+
+    async def test_alerts_carry_subscriber_keyboard(self):
+        bot = FakeBot()
+        with mock.patch.object(broadcaster.db, "get_all_subscribed_users", return_value=[1]):
+            await broadcaster.notify_subscribers(bot, "msg")
+        markup = bot.markups[0]
+        self.assertEqual(markup.keyboard[0][0].text, "🔕 Відписатись")
+        self.assertTrue(markup.is_persistent)
 
     async def test_retry_after_is_retried_once(self):
         bot = FakeBot({1: [RetryAfter(0)]})

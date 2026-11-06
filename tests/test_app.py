@@ -62,11 +62,26 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         checker.get_reading.return_value = Reading(has_light=True, fetched_at=0, voltage=230)
         tracker = StateTracker(False, 0)
         update, context = make_update(), make_context(checker=checker, tracker=tracker)
-        await app.check(update, context)
+        with mock.patch.object(app.db, "get_user_subscription", return_value=False):
+            await app.check(update, context)
+        self.assertEqual(first_button(update.effective_message.reply_text), app.BTN_SUBSCRIBE)
         checker.get_reading.assert_called_once_with(
             max_age=app.CHECK_CACHE_SECONDS, attempts=app.CHECK_ATTEMPTS, timeout=app.CHECK_TIMEOUT)
         self.assertIn("СВІТЛО Є", update.effective_message.reply_text.call_args.args[0])
         self.assertEqual((tracker.has_light, tracker.since), (False, 0))
+
+    async def test_help_and_info_restore_keyboard(self):
+        for handler in (app.help_command, app.info):
+            update = make_update()
+            with mock.patch.object(app.db, "get_user_subscription", return_value=True):
+                await handler(update, make_context())
+            self.assertEqual(first_button(update.effective_message.reply_text), app.BTN_UNSUBSCRIBE)
+
+    def test_keyboard_is_visible_in_private_chats(self):
+        markup = app.build_keyboard(False)
+        self.assertFalse(markup.selective)  # з selective у приватному чаті клавіатуру не видно
+        self.assertTrue(markup.is_persistent)
+        self.assertTrue(markup.resize_keyboard)
 
     async def test_blocked_bot_unsubscribes(self):
         update = SimpleNamespace(my_chat_member=SimpleNamespace(
