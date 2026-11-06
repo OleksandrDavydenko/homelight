@@ -3,7 +3,7 @@ import contextlib
 import logging
 import time
 
-from telegram import BotCommand, BotCommandScopeChat, KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram import BotCommand, BotCommandScopeChat, ReplyKeyboardMarkup, Update
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import TelegramError
 from telegram.ext import (
@@ -19,15 +19,10 @@ from telegram.ext import (
 import broadcaster
 import config
 import db
+from keyboard import BTN_CHECK, BTN_INFO, BTN_SUBSCRIBE, BTN_UNSUBSCRIBE, build_keyboard
 from light_checker import LightChecker, StateTracker, format_status_message
 
 logger = logging.getLogger(__name__)
-
-# Тексти кнопок не змінювати: їх надсилають клавіатури, які вже є в користувачів
-BTN_SUBSCRIBE = "🔔 Підписатись"
-BTN_UNSUBSCRIBE = "🔕 Відписатись"
-BTN_CHECK = "🔌 Перевірити наявність електроенергії"
-BTN_INFO = "ℹ️ Довідка"
 
 # Кнопка «Перевірити»: швидше за фонову перевірку, щоб користувач не чекав довго
 CHECK_CACHE_SECONDS = 30
@@ -42,16 +37,9 @@ DEFAULT_COMMANDS = [
 ]
 
 
-def build_keyboard(subscribed: bool) -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton(BTN_UNSUBSCRIBE if subscribed else BTN_SUBSCRIBE)],
-            [KeyboardButton(BTN_CHECK)],
-            [KeyboardButton(BTN_INFO)],
-        ],
-        resize_keyboard=True,
-        selective=True,
-    )
+async def keyboard_for(user_id: int) -> ReplyKeyboardMarkup:
+    """Клавіатура з урахуванням того, чи підписаний користувач."""
+    return build_keyboard(await asyncio.to_thread(db.get_user_subscription, user_id))
 
 
 def chat_commands(subscribed: bool) -> list[BotCommand]:
@@ -104,8 +92,8 @@ async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    message = update.effective_message
-    if message is None:
+    user, message = update.effective_user, update.effective_message
+    if user is None or message is None:
         return
     await message.reply_text("🔄 Перевіряю наявність електроенергії...")
     checker: LightChecker = context.bot_data["checker"]
@@ -114,32 +102,37 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         checker.get_reading,
         max_age=CHECK_CACHE_SECONDS, attempts=CHECK_ATTEMPTS, timeout=CHECK_TIMEOUT,
     )
-    await message.reply_text(format_status_message(reading, tracker, int(time.time())))
+    await message.reply_text(format_status_message(reading, tracker, int(time.time())),
+                             reply_markup=await keyboard_for(user.id))
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_message is None:
+    user, message = update.effective_user, update.effective_message
+    if user is None or message is None:
         return
-    await update.effective_message.reply_text(
+    await message.reply_text(
         "Доступні команди:\n"
         "/start - Почати роботу з ботом\n"
         "/check - Перевірити наявність світла\n"
         "/subscribe - Підписатись на сповіщення\n"
         "/unsubscribe - Відписатись від сповіщень\n"
         "/help - Показати це повідомлення\n\n"
-        f"Ви також можете натиснути кнопку '{BTN_CHECK}' у клавіатурі."
+        f"Ви також можете натиснути кнопку '{BTN_CHECK}' у клавіатурі.",
+        reply_markup=await keyboard_for(user.id),
     )
 
 
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_message is None:
+    user, message = update.effective_user, update.effective_message
+    if user is None or message is None:
         return
-    await update.effective_message.reply_text(
+    await message.reply_text(
         f"{ABOUT}\n\n"
         f"- Натисніть '{BTN_CHECK}' для миттєвої перевірки.\n"
         f"- Натисніть '{BTN_SUBSCRIBE}', щоб отримувати повідомлення, коли світло зникає "
         f"або з'являється, або '{BTN_UNSUBSCRIBE}', щоб вимкнути сповіщення.\n\n"
-        "Якщо потрібна допомога — напишіть /help"
+        "Якщо потрібна допомога — напишіть /help",
+        reply_markup=await keyboard_for(user.id),
     )
 
 
@@ -148,8 +141,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user, message = update.effective_user, update.effective_message
     if user is None or message is None:
         return
-    subscribed = await asyncio.to_thread(db.get_user_subscription, user.id)
-    await message.reply_text("Оберіть дію з клавіатури:", reply_markup=build_keyboard(subscribed))
+    await message.reply_text("Оберіть дію з клавіатури:", reply_markup=await keyboard_for(user.id))
 
 
 async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

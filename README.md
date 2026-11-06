@@ -69,6 +69,7 @@ TEST_DATABASE_URL=postgresql://user@localhost/homelight_test DB_SSLMODE=disable 
 
 - `app.py` — запуск, обробники команд і кнопок.
 - `broadcaster.py` — фонова перевірка й розсилка сповіщень.
+- `keyboard.py` — клавіатура з кнопками.
 - `light_checker.py` — запити до Shelly Cloud, логіка підтвердження стану, тексти повідомлень.
 - `db.py` — робота з PostgreSQL.
 - `config.py` — налаштування зі змінних середовища.
