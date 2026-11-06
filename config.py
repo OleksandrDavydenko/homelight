@@ -9,6 +9,15 @@ SHELLY_BASE_URL = os.getenv("SHELLY_BASE_URL", "https://shelly-237-eu.shelly.clo
 # MAC пристрою; порожнє значення — брати перший пристрій з акаунта
 TARGET_MAC = os.getenv("TARGET_MAC", "48f6eeb6ec00") or None
 
+# Домашній роутер на ДБЖ (білий IP або домен). Якщо Shelly офлайн, а роутер
+# відповідає, — інтернет у будинку є, отже світла в місті немає. Порожньо — вимкнено.
+ROUTER_HOST = os.getenv("ROUTER_HOST", "").strip() or None
+ROUTER_PORT = int(os.getenv("ROUTER_PORT", "80"))
+
+# Telegram ID власника бота для службових сповіщень (немає інтернету в будинку,
+# Shelly Cloud не відповідає). Порожньо — вимкнено.
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0")) or None
+
 # База даних
 DATABASE_URL = os.getenv("DATABASE_URL")
 
