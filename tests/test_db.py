@@ -29,7 +29,7 @@ class DbTest(unittest.TestCase):
         for p in self._patches:
             p.start()
         with contextlib.closing(self._connect()) as conn, conn, conn.cursor() as cur:
-            cur.execute("DROP TABLE IF EXISTS usersLightBot, light_state;")
+            cur.execute("DROP TABLE IF EXISTS usersLightBot, light_state, announcements;")
         db.init_db()
 
     def _connect(self):
@@ -95,6 +95,13 @@ class DbTest(unittest.TestCase):
         db.init_db()
         self.assertEqual(db.get_light_state(),
                          {"has_light": True, "since": 77, "offline": False, "light_since": None})
+
+    def test_announcement_is_claimed_only_once(self):
+        self.assertFalse(db.is_announcement_sent("a"))
+        self.assertTrue(db.claim_announcement("a", 100))
+        self.assertFalse(db.claim_announcement("a", 200))
+        self.assertTrue(db.is_announcement_sent("a"))
+        self.assertTrue(db.claim_announcement("b", 300))
 
     def test_more_concurrent_queries_than_pool_size(self):
         db.set_subscription(1, "A", True)

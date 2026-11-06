@@ -103,6 +103,12 @@ def init_db() -> None:
         cursor.execute("ALTER TABLE light_state ADD COLUMN IF NOT EXISTS "
                        "offline BOOLEAN NOT NULL DEFAULT FALSE;")
         cursor.execute("ALTER TABLE light_state ADD COLUMN IF NOT EXISTS light_since BIGINT;")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS announcements (
+                id TEXT PRIMARY KEY,
+                sent_at BIGINT NOT NULL
+            );
+        """)
     _run(query)
     logger.info("Таблиці БД готові")
 
@@ -181,3 +187,26 @@ def save_light_state(state: dict) -> None:
                 offline = EXCLUDED.offline, light_since = EXCLUDED.light_since;
     """, params))
     logger.info("Стан світла збережено: %s", state)
+
+
+def is_announcement_sent(announcement_id: str) -> bool:
+    """True, якщо оголошення вже надсилалося."""
+    def query(cursor):
+        cursor.execute("SELECT 1 FROM announcements WHERE id = %s;", (announcement_id,))
+        return cursor.fetchone() is not None
+    return _run(query)
+
+
+def claim_announcement(announcement_id: str, now: int) -> bool:
+    """Позначає оголошення як надіслане. True лише для першого виклику.
+
+    Позначка ставиться до розсилки: краще не надіслати оголошення взагалі
+    (якщо воркер впаде посеред розсилки), ніж надіслати його двічі.
+    """
+    def query(cursor):
+        cursor.execute("""
+            INSERT INTO announcements (id, sent_at) VALUES (%s, %s)
+            ON CONFLICT (id) DO NOTHING RETURNING id;
+        """, (announcement_id, now))
+        return cursor.fetchone() is not None
+    return _run(query)

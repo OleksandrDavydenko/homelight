@@ -83,6 +83,39 @@ async def run_check(bot: Bot, checker: LightChecker, tracker: StateTracker) -> f
     return CONFIRM_INTERVAL if tracker.pending else POLL_INTERVAL
 
 
+async def announcement_job(bot: Bot, announcement_id: str, send_at: float,
+                           deadline: float, text: str) -> bool:
+    """Один раз надсилає оголошення підписникам о send_at. True — якщо надіслано зараз.
+
+    Якщо воркер стартував після send_at, але до deadline, надсилає одразу.
+    Повторну відправку (наприклад, після перезапуску воркера) блокує позначка в БД.
+    """
+    try:
+        if await asyncio.to_thread(db.is_announcement_sent, announcement_id):
+            logger.info("Оголошення %s уже надіслано раніше", announcement_id)
+            return False
+        if time.time() > deadline:
+            logger.info("Оголошення %s застаріло, не надсилаю", announcement_id)
+            return False
+
+        delay = send_at - time.time()
+        if delay > 0:
+            logger.info("Оголошення %s заплановано через %d с", announcement_id, delay)
+            await asyncio.sleep(delay)
+
+        if not await asyncio.to_thread(db.claim_announcement, announcement_id, int(time.time())):
+            logger.info("Оголошення %s уже надсилається іншим процесом", announcement_id)
+            return False
+        sent = await notify_subscribers(bot, text)
+        logger.info("Оголошення %s надіслано %d підписникам", announcement_id, sent)
+        return True
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Не вдалося надіслати оголошення %s", announcement_id)
+        return False
+
+
 async def monitor_loop(bot: Bot, checker: LightChecker, tracker: StateTracker) -> None:
     logger.info("Фонова перевірка світла запущена")
     while True:
