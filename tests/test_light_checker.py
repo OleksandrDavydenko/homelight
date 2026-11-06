@@ -64,10 +64,10 @@ class FakeSession:
         return item
 
 
-def make_checker(*responses, mac=MAC):
+def make_checker(*responses, mac=MAC, router_host=None):
     session = FakeSession(*responses)
     return LightChecker(auth_key="key", base_url="https://shelly.test", target_mac=mac,
-                        session=session), session
+                        session=session, router_host=router_host, router_port=8080), session
 
 
 class ParseReadingTest(unittest.TestCase):
@@ -198,6 +198,70 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(session.calls, 2)
 
 
+@mock.patch.object(light_checker.socket, "create_connection")
+class ProbeRouterTest(unittest.TestCase):
+    def test_connected(self, connect):
+        self.assertEqual(light_checker.probe_router("1.2.3.4", 80), light_checker.ROUTER_OPEN)
+        connect.assert_called_once_with(("1.2.3.4", 80), timeout=5)
+
+    def test_refused(self, connect):
+        connect.side_effect = ConnectionRefusedError()
+        self.assertEqual(light_checker.probe_router("1.2.3.4", 80), light_checker.ROUTER_REFUSED)
+
+    def test_timeout_in_all_attempts_means_silent(self, connect):
+        connect.side_effect = TimeoutError()
+        self.assertEqual(light_checker.probe_router("1.2.3.4", 80, attempts=2),
+                         light_checker.ROUTER_SILENT)
+        self.assertEqual(connect.call_count, 2)
+
+    def test_second_attempt_succeeds(self, connect):
+        connect.side_effect = [OSError("unreachable"), mock.MagicMock()]
+        self.assertEqual(light_checker.probe_router("1.2.3.4", 80), light_checker.ROUTER_OPEN)
+
+
+class RouterCheckTest(unittest.TestCase):
+    def offline_checker(self, router_host="home.example"):
+        return make_checker(FakeResponse(200, payload({})), router_host=router_host)[0]
+
+    def test_offline_shelly_with_router_online_means_no_light(self):
+        for result in (light_checker.ROUTER_OPEN, light_checker.ROUTER_REFUSED):
+            with mock.patch.object(light_checker, "probe_router", return_value=result) as probe:
+                r = self.offline_checker().get_reading()
+            probe.assert_called_once_with("home.example", 8080)
+            self.assertIs(r.has_light, False)
+            self.assertIs(r.internet, True)
+
+    def test_refused_is_not_trusted_once_open_port_was_seen(self):
+        checker = self.offline_checker()
+        with mock.patch.object(light_checker, "probe_router",
+                               side_effect=[light_checker.ROUTER_OPEN, light_checker.ROUTER_REFUSED]):
+            self.assertTrue(checker.check_router()[1])
+            # Порт відомий як відкритий, тож відмова — від обладнання провайдера, а не від роутера
+            self.assertEqual(checker.check_router(), (light_checker.ROUTER_REFUSED, False))
+
+    def test_offline_shelly_with_router_offline_is_unknown(self):
+        checker = self.offline_checker()
+        with mock.patch.object(light_checker, "probe_router", return_value=light_checker.ROUTER_SILENT):
+            r = checker.get_reading(max_age=30)
+        self.assertIsNone(r.has_light)
+        self.assertIs(r.internet, False)
+        self.assertEqual(r.error, "Немає інтернету в будинку")
+        self.assertIsNone(checker._last)  # невідомий стан не кешується
+
+    def test_router_not_probed_when_shelly_online(self):
+        checker = make_checker(FakeResponse(200, payload({MAC: device()})), router_host="home.example")[0]
+        with mock.patch.object(light_checker, "probe_router") as probe:
+            self.assertTrue(checker.get_reading().has_light)
+        probe.assert_not_called()
+
+    def test_router_not_probed_when_not_configured(self):
+        with mock.patch.object(light_checker, "probe_router") as probe:
+            r = self.offline_checker(router_host=None).get_reading()
+        probe.assert_not_called()
+        self.assertIs(r.has_light, False)
+        self.assertIsNone(r.internet)
+
+
 def light(boot_time=None):
     return Reading(has_light=True, fetched_at=0, online=True, voltage=230, boot_time=boot_time)
 
@@ -208,6 +272,11 @@ def dark():
 
 def offline():
     return Reading(has_light=False, fetched_at=0, online=False)
+
+
+def offline_with_internet():
+    """Shelly офлайн, а роутер відповідає — світла немає точно."""
+    return Reading(has_light=False, fetched_at=0, online=False, internet=True)
 
 
 UNKNOWN = Reading(has_light=None, fetched_at=0)
@@ -304,6 +373,32 @@ class StateTrackerTest(unittest.TestCase):
         self.assertEqual(restored.to_dict(), t.to_dict())
         self.assertFalse(StateTracker.from_dict(None).known)
 
+    def test_outage_confirmed_by_router_needs_no_three_minutes(self):
+        t = StateTracker(True, 0)
+        self.assertIsNone(t.observe(offline_with_internet(), 1000))
+        change = t.observe(offline_with_internet(), 1020)
+        self.assertEqual((change.kind, change.since, change.noticed_at), (LOST, 1000, 1020))
+        self.assertFalse(t.offline)  # причина відома — світла немає
+        self.assertIsNone(t.light_since)
+
+    def test_router_confirms_cause_of_ongoing_offline_outage(self):
+        t = StateTracker(False, 5000, offline=True, light_since=100)
+        t.observe(offline_with_internet(), 5100)
+        self.assertFalse(t.offline)
+
+    def test_return_after_certain_outage_uses_boot_time(self):
+        t = StateTracker(False, 5000)
+        t.observe(light(boot_time=5900), 6000)
+        change = t.observe(light(boot_time=5900), 6020)
+        self.assertEqual((change.kind, change.returned_at, change.previous_duration),
+                         (RESTORED, 5900, 900))
+
+    def test_certain_outage_is_never_reported_as_internet(self):
+        t = StateTracker(False, 5000)  # offline=False: світла точно не було
+        t.observe(light(boot_time=50), 6000)
+        change = t.observe(light(boot_time=50), 6020)
+        self.assertEqual((change.kind, change.returned_at), (RESTORED, None))
+
     def test_single_confirmation_mode(self):
         t = StateTracker(True, 0, confirmations=1)
         self.assertEqual(t.observe(dark(), 50).since, 50)
@@ -349,6 +444,21 @@ class FormattingTest(unittest.TestCase):
         self.assertIn("Не вдалося отримати дані", text)
         self.assertIn("Останній відомий стан: світла немає", text)
         self.assertNotIn("boom", text)
+
+    def test_status_offline_with_internet(self):
+        r = Reading(has_light=False, fetched_at=NOW, online=False, internet=True)
+        text = format_status_message(r, StateTracker(False, NOW - 600), NOW)
+        self.assertTrue(text.startswith("❌ СВІТЛА НЕМАЄ\n"))
+        self.assertNotIn("ймовірно", text)
+        self.assertIn("інтернет у будинку працює", text)
+        self.assertIn("Час відключення: 10 хв 0 сек", text)
+
+    def test_status_no_internet_at_home(self):
+        r = Reading(has_light=None, fetched_at=NOW, online=False, internet=False,
+                    error="Немає інтернету в будинку")
+        text = format_status_message(r, StateTracker(True, NOW - 600), NOW)
+        self.assertIn("У будинку зараз немає інтернету", text)
+        self.assertIn("Останній відомий стан: світло є", text)
 
     def test_status_offline(self):
         r = Reading(has_light=False, fetched_at=NOW, online=False)

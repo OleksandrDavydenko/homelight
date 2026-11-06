@@ -106,7 +106,8 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
     async def test_monitor_starts_even_if_menu_fails_and_stops_cleanly(self):
         started = asyncio.Event()
 
-        async def fake_monitor(bot, checker, tracker):
+        async def fake_monitor(bot, checker, tracker, admin_watch):
+            self.assertIsInstance(admin_watch, app.broadcaster.AdminWatch)
             started.set()
             await asyncio.Event().wait()
 

@@ -4,22 +4,25 @@
 - не вдалося отримати дані (немає інтернету на сервері, збій Shelly Cloud) —
   стан невідомий, сповіщень немає;
 - пристрій онлайн — стан визначає напруга;
-- пристрій офлайн — пропало світло АБО інтернет у будинку. У моменті це не
-  розрізнити, тому бот чекає OFFLINE_CONFIRM_SECONDS і повідомляє про
-  відключення. Коли пристрій повертається, за його uptime видно, чи він
-  перезавантажувався: якщо ні — живлення не зникало, і бот повідомляє,
-  що пропадав лише інтернет.
+- пристрій офлайн — пропало світло АБО інтернет у будинку. Якщо задано
+  ROUTER_HOST, бот перевіряє домашній роутер (він на ДБЖ): відповідає —
+  інтернет є, отже світла немає точно; не відповідає — збій провайдера,
+  стан невідомий. Без ROUTER_HOST бот чекає OFFLINE_CONFIRM_SECONDS і
+  повідомляє про відключення, а коли пристрій повертається, за його uptime
+  видно, чи він перезавантажувався: якщо ні — живлення не зникало, і бот
+  повідомляє, що пропадав лише інтернет.
 """
 import logging
+import socket
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import requests
 
-from config import SHELLY_AUTH_KEY, SHELLY_BASE_URL, TARGET_MAC, TIMEZONE
+from config import ROUTER_HOST, ROUTER_PORT, SHELLY_AUTH_KEY, SHELLY_BASE_URL, TARGET_MAC, TIMEZONE
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +56,30 @@ class Reading:
     online: bool | None = None
     device_time: int | None = None  # коли пристрій востаннє оновлював дані, якщо відомо
     boot_time: int | None = None    # коли пристрій востаннє ввімкнувся (за його uptime)
+    internet: bool | None = None    # чи відповідає домашній роутер; None — не перевірялося
     error: str | None = None
 
     @property
     def known(self) -> bool:
         return self.has_light is not None
+
+
+ROUTER_OPEN = "open"        # з'єднання встановлено — роутер точно на зв'язку
+ROUTER_REFUSED = "refused"  # відмова (закритий порт) — найімовірніше, відповів роутер
+ROUTER_SILENT = "silent"    # відповіді немає — інтернету в будинку немає
+
+
+def probe_router(host: str, port: int, timeout: float = 5, attempts: int = 2) -> str:
+    """Перевіряє, чи відповідає домашній роутер з інтернету (ROUTER_OPEN/REFUSED/SILENT)."""
+    for _ in range(attempts):
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return ROUTER_OPEN
+        except ConnectionRefusedError:
+            return ROUTER_REFUSED
+        except OSError:
+            continue
+    return ROUTER_SILENT
 
 
 def _to_float(value) -> float | None:
@@ -102,10 +124,14 @@ def _extract_switch_data(device: dict) -> tuple[float | None, float | None]:
 
 class LightChecker:
     def __init__(self, auth_key=SHELLY_AUTH_KEY, base_url=SHELLY_BASE_URL,
-                 target_mac=TARGET_MAC, session=None):
+                 target_mac=TARGET_MAC, session=None,
+                 router_host=ROUTER_HOST, router_port=ROUTER_PORT):
         self.auth_key = auth_key
         self.base_url = base_url
         self.target_mac = target_mac
+        self.router_host = router_host
+        self.router_port = router_port
+        self._router_open_seen = False
         self._session = session or requests.Session()
         self._lock = threading.Lock()
         self._last: Reading | None = None
@@ -204,12 +230,36 @@ class LightChecker:
             try:
                 data = self.fetch_all_status(attempts=attempts, timeout=timeout)
                 reading = self.parse_reading(data, int(time.time()))
+                if reading.online is False and self.router_host:
+                    reading = self._check_router(reading)
             except Exception as e:
                 logger.error("Не вдалося отримати стан світла: %s", e)
                 return Reading(has_light=None, fetched_at=int(time.time()), error=str(e))
             if reading.known:
                 self._last = reading
             return reading
+
+    def check_router(self) -> tuple[str, bool]:
+        """Перевіряє роутер. Повертає (результат probe_router, чи є інтернет у будинку).
+
+        Відмову (RST) може надіслати й обладнання провайдера, коли до роутера
+        зв'язку вже немає. Тому щойно бот хоч раз побачив відкритий порт,
+        інтернет вважається наявним лише за встановленого з'єднання.
+        """
+        result = probe_router(self.router_host, self.router_port)
+        if result == ROUTER_OPEN:
+            self._router_open_seen = True
+        online = result == ROUTER_OPEN or (result == ROUTER_REFUSED and not self._router_open_seen)
+        return result, online
+
+    def _check_router(self, reading: Reading) -> Reading:
+        """Shelly офлайн: розрізнити відключення світла й зникнення інтернету в будинку."""
+        result, online = self.check_router()
+        if online:
+            logger.info("Shelly офлайн, а роутер відповідає (%s) — світла немає", result)
+            return replace(reading, internet=True)
+        logger.warning("Shelly офлайн і роутер не відповідає (%s) — немає інтернету в будинку", result)
+        return replace(reading, has_light=None, internet=False, error="Немає інтернету в будинку")
 
 
 @dataclass(frozen=True)
@@ -279,6 +329,14 @@ class StateTracker:
         self._pending_count = 0
         self._pending_since = None
 
+    @staticmethod
+    def _cause_unknown(reading: Reading) -> bool:
+        """Пристрій офлайн, і невідомо чому: світло чи інтернет у будинку.
+
+        Якщо роутер відповідає (internet=True), причина відома — світла немає.
+        """
+        return reading.has_light is False and reading.online is False and reading.internet is not True
+
     def observe(self, reading: Reading, now: int) -> StateChange | None:
         value = reading.has_light
         if value is None:
@@ -286,15 +344,17 @@ class StateTracker:
 
         if self.has_light is None:
             self.has_light, self.since = value, now
-            self.offline = value is False and reading.online is False
+            self.offline = self._cause_unknown(reading)
             self.light_since = None
             self._reset_pending()
             return StateChange(INITIAL, value, since=now, noticed_at=now)
 
         if value == self.has_light:
             self._reset_pending()
-            if value is False and reading.online:
-                self.offline = False  # пристрій на зв'язку, а напруги немає — відключення справжнє
+            if value is False and not self._cause_unknown(reading):
+                # Напруги немає на онлайн-пристрої або роутер підтвердив інтернет —
+                # відключення справжнє
+                self.offline = False
             return None
 
         if self._pending_count == 0:
@@ -302,7 +362,7 @@ class StateTracker:
         self._pending_count += 1
         if self._pending_count < self.confirmations:
             return None
-        if (value is False and reading.online is False
+        if (self._cause_unknown(reading)
                 and now - self._pending_since < self.offline_confirm_seconds):
             return None
 
@@ -313,7 +373,7 @@ class StateTracker:
         return self._restored(reading, started, now)
 
     def _lost(self, reading: Reading, started: int, now: int) -> StateChange:
-        offline = reading.online is False
+        offline = self._cause_unknown(reading)
         change = StateChange(
             LOST, False, since=started, noticed_at=now,
             previous_duration=started - self.since if self.since is not None else None,
@@ -334,7 +394,10 @@ class StateTracker:
             change = StateChange(INTERNET, True, since=since, noticed_at=now,
                                  previous_duration=started - outage_start)
         else:
-            returned_at = boot if offline_outage and outage_start < boot <= now else None
+            # Пристрій увімкнувся після початку відключення — отже, саме тоді
+            # повернулося живлення (навіть якщо інтернет з'явився пізніше)
+            returned_at = (boot if boot is not None and outage_start is not None
+                           and outage_start < boot <= now else None)
             since = returned_at if returned_at is not None else started
             change = StateChange(
                 RESTORED, True, since=since, noticed_at=now,
@@ -399,7 +462,10 @@ def format_time(timestamp: int, now: int) -> str:
 def format_status_message(reading: Reading, tracker: StateTracker, now: int) -> str:
     """Відповідь на кнопку «Перевірити». Стан не змінює."""
     if not reading.known:
-        lines = ["⚠️ Не вдалося отримати дані від Shelly. Спробуйте пізніше."]
+        if reading.internet is False:
+            lines = ["⚠️ У будинку зараз немає інтернету, тому стан світла невідомий."]
+        else:
+            lines = ["⚠️ Не вдалося отримати дані від Shelly. Спробуйте пізніше."]
         if tracker.known and tracker.since is not None:
             state = "світло є" if tracker.has_light else "світла немає"
             lines.append(f"\nОстанній відомий стан: {state} з {format_moment(tracker.since, now)}.")
@@ -414,6 +480,11 @@ def format_status_message(reading: Reading, tracker: StateTracker, now: int) -> 
         lines = ["✅ СВІТЛО Є", "", f"🔌 Напруга: {voltage}", f"〰️  Частота: {frequency}"]
         if confirmed:
             lines.append(f"⏱️ Світло є вже: {format_duration(now - tracker.since)}")
+    elif reading.online is False and reading.internet:
+        lines = ["❌ СВІТЛА НЕМАЄ", "",
+                 "📡 Пристрій не на зв'язку, а інтернет у будинку працює — отже світла немає."]
+        if confirmed:
+            lines.append(f"⏱️ Час відключення: {format_duration(now - tracker.since)}")
     elif reading.online is False:
         lines = ["❌ СВІТЛА НЕМАЄ (ймовірно)", "",
                  "📡 Пристрій не на зв'язку — так буває при відключенні світла "

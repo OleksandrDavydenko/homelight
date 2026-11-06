@@ -20,7 +20,13 @@ import broadcaster
 import config
 import db
 from keyboard import BTN_CHECK, BTN_INFO, BTN_SUBSCRIBE, BTN_UNSUBSCRIBE, build_keyboard
-from light_checker import LightChecker, StateTracker, format_status_message
+from light_checker import (
+    ROUTER_OPEN,
+    ROUTER_REFUSED,
+    LightChecker,
+    StateTracker,
+    format_status_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -173,16 +179,42 @@ async def post_init(app: Application) -> None:
 
     checker = LightChecker()
     tracker = StateTracker.from_dict(state)
+    admin_watch = broadcaster.AdminWatch(config.ADMIN_CHAT_ID)
     app.bot_data["checker"] = checker
     app.bot_data["tracker"] = tracker
     app.bot_data["monitor_task"] = asyncio.create_task(
-        broadcaster.monitor_loop(app.bot, checker, tracker), name="light-monitor"
+        broadcaster.monitor_loop(app.bot, checker, tracker, admin_watch), name="light-monitor"
     )
+
+    if not config.ADMIN_CHAT_ID:
+        logger.info("ADMIN_CHAT_ID не задано — службові сповіщення власнику вимкнені")
+    await log_router_check(checker)
 
     try:
         await app.bot.set_my_commands(DEFAULT_COMMANDS)
     except TelegramError as e:
         logger.warning("Не вдалося встановити меню команд: %s", e)
+
+
+async def log_router_check(checker: LightChecker) -> None:
+    """Під час старту перевіряє, чи відповідає домашній роутер, і пише результат у лог.
+
+    IP-адресу в лог не пишемо — лише порт.
+    """
+    if not checker.router_host:
+        logger.info("ROUTER_HOST не задано — перевірка інтернету в будинку вимкнена")
+        return
+    result, _ = await asyncio.to_thread(checker.check_router)
+    port = checker.router_port
+    if result == ROUTER_OPEN:
+        logger.info("Роутер (порт %s) відкритий — перевірка інтернету в будинку працює "
+                    "в найнадійнішому режимі", port)
+    elif result == ROUTER_REFUSED:
+        logger.info("Роутер (порт %s) відповідає відмовою — перевірка працює; надійніше "
+                    "відкрити порт (віддалене керування роутером)", port)
+    else:
+        logger.warning("Роутер (порт %s) не відповідає: перевірте ROUTER_HOST/ROUTER_PORT "
+                       "або ввімкніть віддалене керування роутером", port)
 
 
 async def post_stop(app: Application) -> None:

@@ -13,13 +13,21 @@ from telegram.error import Forbidden, RetryAfter, TelegramError
 
 import db
 from keyboard import build_keyboard
-from light_checker import LightChecker, StateTracker, format_alert
+from light_checker import (
+    LightChecker,
+    Reading,
+    StateTracker,
+    format_alert,
+    format_duration,
+    format_moment,
+)
 
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL = 90      # с між звичайними перевірками
 CONFIRM_INTERVAL = 20   # с до повторної перевірки, коли стан, схоже, змінився
 SEND_DELAY = 0.05       # с між повідомленнями (ліміт Telegram ~30 повідомлень/с)
+ADMIN_ALERT_AFTER = 180  # с без даних про стан світла, після яких повідомити власника
 
 
 async def _send(bot: Bot, user_id: int, text: str, reply_markup=None) -> bool:
@@ -63,13 +71,63 @@ async def notify_subscribers(bot: Bot, message: str) -> int:
     return sent
 
 
-async def run_check(bot: Bot, checker: LightChecker, tracker: StateTracker) -> float:
+class AdminWatch:
+    """Службові сповіщення лише власнику бота (ADMIN_CHAT_ID), не підписникам.
+
+    Якщо стан світла невідомий довше за alert_after (немає інтернету в будинку
+    або Shelly Cloud не відповідає), надсилає одне попередження, а коли дані
+    знову з'являються — повідомлення про відновлення.
+    """
+
+    def __init__(self, chat_id: int | None, alert_after: float = ADMIN_ALERT_AFTER):
+        self.chat_id = chat_id
+        self.alert_after = alert_after
+        self._unknown_since: int | None = None
+        self._alerted = False
+
+    async def observe(self, bot: Bot, reading: Reading, now: int) -> None:
+        if not self.chat_id:
+            return
+
+        if reading.known:
+            if self._alerted:
+                gap = format_duration(now - self._unknown_since)
+                await _send(bot, self.chat_id, f"✅ Зв'язок відновився (не було {gap}).")
+            self._unknown_since, self._alerted = None, False
+            return
+
+        if self._unknown_since is None:
+            self._unknown_since = now
+        if self._alerted or now - self._unknown_since < self.alert_after:
+            return
+
+        self._alerted = True
+        since = format_moment(self._unknown_since, now)
+        if reading.internet is False:
+            text = (f"⚠️ У будинку немає інтернету з {since} (роутер не відповідає).\n"
+                    "Стан світла невідомий, підписникам нічого не надсилається.")
+        else:
+            error = (reading.error or "невідома помилка")[:300]
+            text = f"⚠️ Не вдається отримати дані з Shelly з {since}:\n{error}"
+        await _send(bot, self.chat_id, text)
+
+
+async def run_check(bot: Bot, checker: LightChecker, tracker: StateTracker,
+                    admin_watch: AdminWatch | None = None) -> float:
     """Одна перевірка: читання → підтвердження зміни → збереження → розсилка.
 
     Повертає, через скільки секунд робити наступну перевірку.
     """
     reading = await asyncio.to_thread(checker.get_reading)
-    change = tracker.observe(reading, int(time.time()))
+    now = int(time.time())
+
+    if admin_watch is not None:
+        try:
+            await admin_watch.observe(bot, reading, now)
+        except Exception:
+            logger.exception("Не вдалося надіслати службове сповіщення")
+
+    change = tracker.observe(reading, now)
 
     if change is not None:
         try:
@@ -87,12 +145,13 @@ async def run_check(bot: Bot, checker: LightChecker, tracker: StateTracker) -> f
     return CONFIRM_INTERVAL if tracker.pending else POLL_INTERVAL
 
 
-async def monitor_loop(bot: Bot, checker: LightChecker, tracker: StateTracker) -> None:
+async def monitor_loop(bot: Bot, checker: LightChecker, tracker: StateTracker,
+                       admin_watch: AdminWatch | None = None) -> None:
     logger.info("Фонова перевірка світла запущена")
     while True:
         delay = POLL_INTERVAL
         try:
-            delay = await run_check(bot, checker, tracker)
+            delay = await run_check(bot, checker, tracker, admin_watch)
         except asyncio.CancelledError:
             raise
         except Exception:
