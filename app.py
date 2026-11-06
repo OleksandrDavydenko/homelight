@@ -180,7 +180,7 @@ async def post_init(app: Application) -> None:
     state = await asyncio.to_thread(db.get_light_state)
 
     checker = LightChecker()
-    tracker = StateTracker(*state) if state else StateTracker()
+    tracker = StateTracker.from_dict(state)
     app.bot_data["checker"] = checker
     app.bot_data["tracker"] = tracker
     app.bot_data["monitor_task"] = asyncio.create_task(

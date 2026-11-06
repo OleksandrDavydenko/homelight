@@ -100,7 +100,8 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
             bot_data={},
         )
         with mock.patch.object(app.db, "init_db") as init_db, \
-                mock.patch.object(app.db, "get_light_state", return_value=(False, 123)), \
+                mock.patch.object(app.db, "get_light_state",
+                                  return_value={"has_light": False, "since": 123, "offline": False, "light_since": None}), \
                 mock.patch.object(app.broadcaster, "monitor_loop", fake_monitor):
             await app.post_init(application)
             await asyncio.wait_for(started.wait(), 1)

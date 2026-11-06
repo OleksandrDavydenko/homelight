@@ -94,9 +94,15 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS light_state (
                 id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
                 has_light BOOLEAN NOT NULL,
-                since BIGINT NOT NULL
+                since BIGINT NOT NULL,
+                offline BOOLEAN NOT NULL DEFAULT FALSE,
+                light_since BIGINT
             );
         """)
+        # Для таблиці, створеної попередньою версією без цих колонок
+        cursor.execute("ALTER TABLE light_state ADD COLUMN IF NOT EXISTS "
+                       "offline BOOLEAN NOT NULL DEFAULT FALSE;")
+        cursor.execute("ALTER TABLE light_state ADD COLUMN IF NOT EXISTS light_since BIGINT;")
     _run(query)
     logger.info("Таблиці БД готові")
 
@@ -150,20 +156,28 @@ def get_all_subscribed_users() -> list[int]:
     return _run(query)
 
 
-def get_light_state() -> tuple[bool, int] | None:
-    """Підтверджений стан світла: (has_light, since) або None, якщо ще не збережено."""
+def get_light_state() -> dict | None:
+    """Підтверджений стан світла (див. StateTracker.to_dict) або None, якщо ще не збережено."""
     def query(cursor):
-        cursor.execute("SELECT has_light, since FROM light_state WHERE id = 1;")
+        cursor.execute(
+            "SELECT has_light, since, offline, light_since FROM light_state WHERE id = 1;"
+        )
         row = cursor.fetchone()
-        return (bool(row[0]), int(row[1])) if row else None
+        if not row:
+            return None
+        return {"has_light": bool(row[0]), "since": int(row[1]),
+                "offline": bool(row[2]), "light_since": row[3]}
     return _run(query)
 
 
-def save_light_state(has_light: bool, since: int) -> None:
-    """Зберігає підтверджений стан світла."""
+def save_light_state(state: dict) -> None:
+    """Зберігає підтверджений стан світла (StateTracker.to_dict)."""
+    params = (state["has_light"], state["since"], bool(state.get("offline")), state.get("light_since"))
     _run(lambda cursor: cursor.execute("""
-        INSERT INTO light_state (id, has_light, since) VALUES (1, %s, %s)
+        INSERT INTO light_state (id, has_light, since, offline, light_since)
+        VALUES (1, %s, %s, %s, %s)
         ON CONFLICT (id) DO UPDATE
-            SET has_light = EXCLUDED.has_light, since = EXCLUDED.since;
-    """, (has_light, since)))
-    logger.info("Стан світла збережено: has_light=%s since=%s", has_light, since)
+            SET has_light = EXCLUDED.has_light, since = EXCLUDED.since,
+                offline = EXCLUDED.offline, light_since = EXCLUDED.light_since;
+    """, params))
+    logger.info("Стан світла збережено: %s", state)

@@ -78,10 +78,23 @@ class DbTest(unittest.TestCase):
 
     def test_light_state_roundtrip(self):
         self.assertIsNone(db.get_light_state())
-        db.save_light_state(False, 100)
-        self.assertEqual(db.get_light_state(), (False, 100))
-        db.save_light_state(True, 200)
-        self.assertEqual(db.get_light_state(), (True, 200))
+        offline = {"has_light": False, "since": 100, "offline": True, "light_since": 50}
+        db.save_light_state(offline)
+        self.assertEqual(db.get_light_state(), offline)
+        light = {"has_light": True, "since": 200, "offline": False, "light_since": None}
+        db.save_light_state(light)
+        self.assertEqual(db.get_light_state(), light)
+
+    def test_migrates_light_state_table_from_previous_version(self):
+        with contextlib.closing(self._connect()) as conn, conn, conn.cursor() as cur:
+            cur.execute("DROP TABLE light_state;")
+            cur.execute("""CREATE TABLE light_state (
+                id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+                has_light BOOLEAN NOT NULL, since BIGINT NOT NULL);""")
+            cur.execute("INSERT INTO light_state (id, has_light, since) VALUES (1, TRUE, 77);")
+        db.init_db()
+        self.assertEqual(db.get_light_state(),
+                         {"has_light": True, "since": 77, "offline": False, "light_since": None})
 
     def test_more_concurrent_queries_than_pool_size(self):
         db.set_subscription(1, "A", True)

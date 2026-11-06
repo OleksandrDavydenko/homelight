@@ -84,7 +84,7 @@ class RunCheckTest(unittest.IsolatedAsyncioTestCase):
         delay = await broadcaster.run_check(bot, checker, tracker)
         self.assertEqual(delay, broadcaster.POLL_INTERVAL)
         self.assertEqual(bot.sent, [(42, "🔴 СВІТЛО ПРОПАЛО!")])
-        self.assertIs(self.save.call_args.args[0], False)
+        self.assertIs(self.save.call_args.args[0]["has_light"], False)
 
     async def test_unknown_readings_change_nothing(self):
         bot, tracker = FakeBot(), StateTracker(True, 1000)

@@ -65,11 +65,11 @@ async def run_check(bot: Bot, checker: LightChecker, tracker: StateTracker) -> f
     Повертає, через скільки секунд робити наступну перевірку.
     """
     reading = await asyncio.to_thread(checker.get_reading)
-    change = tracker.observe(reading.has_light, int(time.time()))
+    change = tracker.observe(reading, int(time.time()))
 
     if change is not None:
         try:
-            await asyncio.to_thread(db.save_light_state, change.has_light, change.since)
+            await asyncio.to_thread(db.save_light_state, tracker.to_dict())
         except Exception:
             # Стан у пам'яті вже оновлено, тож розсилку все одно робимо
             logger.exception("Не вдалося зберегти стан світла в БД")
@@ -77,6 +77,7 @@ async def run_check(bot: Bot, checker: LightChecker, tracker: StateTracker) -> f
         if change.initial:
             logger.info("Початковий стан: світло %s", "Є" if change.has_light else "НЕМАЄ")
         else:
+            logger.info("Зміна стану: %s", change)
             await notify_subscribers(bot, format_alert(change))
 
     return CONFIRM_INTERVAL if tracker.pending else POLL_INTERVAL
