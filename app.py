@@ -48,16 +48,24 @@ async def keyboard_for(user_id: int) -> ReplyKeyboardMarkup:
     return build_keyboard(await asyncio.to_thread(db.get_user_subscription, user_id))
 
 
-def chat_commands(subscribed: bool) -> list[BotCommand]:
+def chat_commands(subscribed: bool, admin: bool = False) -> list[BotCommand]:
     toggle = (BotCommand("unsubscribe", "Відписатись") if subscribed
               else BotCommand("subscribe", "Підписатись"))
-    return [toggle, *DEFAULT_COMMANDS]
+    commands = [toggle, *DEFAULT_COMMANDS]
+    if admin:
+        commands.append(BotCommand("router", "Перевірити роутер"))
+    return commands
+
+
+def is_admin(user_id: int) -> bool:
+    return bool(config.ADMIN_CHAT_ID) and user_id == config.ADMIN_CHAT_ID
 
 
 async def update_chat_commands(bot, chat_id: int, subscribed: bool) -> None:
     """Меню команд для конкретного чату. Помилка тут не критична."""
     try:
-        await bot.set_my_commands(chat_commands(subscribed), scope=BotCommandScopeChat(chat_id=chat_id))
+        await bot.set_my_commands(chat_commands(subscribed, admin=is_admin(chat_id)),
+                                  scope=BotCommandScopeChat(chat_id=chat_id))
     except TelegramError as e:
         logger.warning("Не вдалося оновити меню команд для %s: %s", chat_id, e)
 
@@ -150,6 +158,38 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await message.reply_text("Оберіть дію з клавіатури:", reply_markup=await keyboard_for(user.id))
 
 
+async def router_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/router — лише для власника: перевірити домашній роутер просто зараз.
+
+    Нічого не змінює й нікому не розсилає, тож нею можна безпечно перевірити
+    налаштування (наприклад, вийнявши кабель інтернету з роутера).
+    """
+    message = update.effective_message
+    if message is None:
+        return
+    checker: LightChecker = context.bot_data["checker"]
+    if not checker.router_host:
+        await message.reply_text("ℹ️ ROUTER_HOST не задано в налаштуваннях Heroku — "
+                                 "перевірка роутера вимкнена.")
+        return
+
+    await message.reply_text("🔄 Перевіряю роутер...")
+    result, online = await asyncio.to_thread(checker.check_router)
+    target = f"{checker.router_host}:{checker.router_port}"
+    if result == ROUTER_OPEN:
+        text = (f"✅ Роутер {target} відповідає: порт відкритий (з'єднання встановлено).\n"
+                "Це найнадійніший режим.")
+    elif result == ROUTER_REFUSED:
+        text = f"✅ Роутер {target} відповідає відмовою (порт закритий)."
+        if not online:
+            text += ("\nАле раніше цей порт був відкритий, тож бот вважає таку відмову "
+                     "відповіддю обладнання провайдера, а не вашого роутера.")
+    else:
+        text = f"❌ Роутер {target} не відповідає."
+    text += f"\n\nВисновок бота: інтернет у будинку {'є' if online else 'немає'}."
+    await message.reply_text(text)
+
+
 async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Користувач заблокував бота — відписуємо, щоб не слати йому сповіщення."""
     change = update.my_chat_member
@@ -195,6 +235,14 @@ async def post_init(app: Application) -> None:
     except TelegramError as e:
         logger.warning("Не вдалося встановити меню команд: %s", e)
 
+    if config.ADMIN_CHAT_ID:
+        # Меню власника з командою /router — одразу, без очікування /start
+        try:
+            subscribed = await asyncio.to_thread(db.get_user_subscription, config.ADMIN_CHAT_ID)
+            await update_chat_commands(app.bot, config.ADMIN_CHAT_ID, subscribed)
+        except Exception:
+            logger.exception("Не вдалося встановити меню команд власника")
+
 
 async def log_router_check(checker: LightChecker) -> None:
     """Під час старту перевіряє, чи відповідає домашній роутер, і пише результат у лог.
@@ -231,6 +279,10 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("check", check))
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))
+    if config.ADMIN_CHAT_ID:
+        # Лише для власника; для інших /router — невідома команда (спрацює show_menu)
+        app.add_handler(CommandHandler("router", router_command,
+                                       filters=filters.User(user_id=config.ADMIN_CHAT_ID)))
 
     app.add_handler(MessageHandler(filters.Text([BTN_SUBSCRIBE]), subscribe))
     app.add_handler(MessageHandler(filters.Text([BTN_UNSUBSCRIBE]), unsubscribe))

@@ -1,12 +1,16 @@
 import asyncio
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest import mock
 
+from telegram import Chat, Message, MessageEntity, Update, User
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import NetworkError
+from telegram.ext import CommandHandler
 
 import app
+import light_checker
 from light_checker import Reading, StateTracker
 
 
@@ -102,6 +106,87 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         update_sub.assert_not_called()
 
 
+def router_checker(result=None, online=True, host="195.0.2.10"):
+    checker = mock.Mock(router_host=host, router_port=80)
+    checker.check_router.return_value = (result, online)
+    return checker
+
+
+def reply_texts(update):
+    return [c.args[0] for c in update.effective_message.reply_text.call_args_list]
+
+
+class RouterCommandTest(unittest.IsolatedAsyncioTestCase):
+    async def run_router(self, checker):
+        update = make_update()
+        await app.router_command(update, make_context(checker=checker))
+        return reply_texts(update)
+
+    async def test_not_configured(self):
+        checker = router_checker(host=None)
+        texts = await self.run_router(checker)
+        self.assertEqual(len(texts), 1)
+        self.assertIn("ROUTER_HOST не задано", texts[0])
+        checker.check_router.assert_not_called()
+
+    async def test_open_port(self):
+        texts = await self.run_router(router_checker(light_checker.ROUTER_OPEN))
+        self.assertEqual(texts[0], "🔄 Перевіряю роутер...")
+        self.assertIn("✅ Роутер 195.0.2.10:80 відповідає: порт відкритий", texts[1])
+        self.assertTrue(texts[1].endswith("Висновок бота: інтернет у будинку є."))
+
+    async def test_refused(self):
+        texts = await self.run_router(router_checker(light_checker.ROUTER_REFUSED))
+        self.assertIn("відповідає відмовою", texts[1])
+        self.assertNotIn("обладнання провайдера", texts[1])
+        self.assertTrue(texts[1].endswith("інтернет у будинку є."))
+
+    async def test_refused_in_strict_mode(self):
+        texts = await self.run_router(router_checker(light_checker.ROUTER_REFUSED, online=False))
+        self.assertIn("обладнання провайдера", texts[1])
+        self.assertTrue(texts[1].endswith("інтернет у будинку немає."))
+
+    async def test_silent(self):
+        texts = await self.run_router(router_checker(light_checker.ROUTER_SILENT, online=False))
+        self.assertIn("❌ Роутер 195.0.2.10:80 не відповідає.", texts[1])
+        self.assertTrue(texts[1].endswith("інтернет у будинку немає."))
+
+
+def command_update(user_id, text="/router"):
+    message = Message(
+        message_id=1, date=datetime.now(timezone.utc), text=text,
+        chat=Chat(id=user_id, type=Chat.PRIVATE), from_user=User(id=user_id, first_name="x", is_bot=False),
+        entities=[MessageEntity(type=MessageEntity.BOT_COMMAND, offset=0, length=len(text))],
+    )
+    return Update(update_id=1, message=message)
+
+
+class AdminOnlyTest(unittest.TestCase):
+    def router_handlers(self, admin_id):
+        with mock.patch.object(app.config, "TELEGRAM_TOKEN", "123:abc"), \
+                mock.patch.object(app.config, "ADMIN_CHAT_ID", admin_id):
+            application = app.build_application()
+        return [h for h in application.handlers[0]
+                if isinstance(h, CommandHandler) and "router" in h.commands]
+
+    def test_router_command_only_for_admin(self):
+        [handler] = self.router_handlers(777)
+        self.assertTrue(handler.filters.check_update(command_update(777)))
+        self.assertFalse(handler.filters.check_update(command_update(123)))
+
+    def test_no_router_command_without_admin(self):
+        self.assertEqual(self.router_handlers(None), [])
+
+    def test_admin_menu_has_router(self):
+        self.assertIn("router", [c.command for c in app.chat_commands(True, admin=True)])
+        self.assertNotIn("router", [c.command for c in app.chat_commands(True)])
+        with mock.patch.object(app.config, "ADMIN_CHAT_ID", 777):
+            self.assertTrue(app.is_admin(777))
+            self.assertFalse(app.is_admin(123))
+        with mock.patch.object(app.config, "ADMIN_CHAT_ID", None):
+            self.assertFalse(app.is_admin(777))
+
+
 class LifecycleTest(unittest.IsolatedAsyncioTestCase):
     async def test_monitor_starts_even_if_menu_fails_and_stops_cleanly(self):
         started = asyncio.Event()
@@ -130,8 +215,26 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         await app.post_stop(application)
         self.assertTrue(task.cancelled())
 
+    async def test_admin_gets_router_menu_on_start(self):
+        async def fake_monitor(*args):
+            await asyncio.Event().wait()
+
+        application = SimpleNamespace(bot=SimpleNamespace(set_my_commands=mock.AsyncMock()), bot_data={})
+        with mock.patch.object(app.config, "ADMIN_CHAT_ID", 777), \
+                mock.patch.object(app.db, "init_db"), \
+                mock.patch.object(app.db, "get_light_state", return_value=None), \
+                mock.patch.object(app.db, "get_user_subscription", return_value=True), \
+                mock.patch.object(app.broadcaster, "monitor_loop", fake_monitor):
+            await app.post_init(application)
+            await app.post_stop(application)
+        admin_call = application.bot.set_my_commands.call_args_list[-1]
+        self.assertEqual(admin_call.kwargs["scope"].chat_id, 777)
+        self.assertEqual([c.command for c in admin_call.args[0]],
+                         ["unsubscribe", "check", "help", "router"])
+
     def test_build_application_registers_handlers(self):
-        with mock.patch.object(app.config, "TELEGRAM_TOKEN", "123:abc"):
+        with mock.patch.object(app.config, "TELEGRAM_TOKEN", "123:abc"), \
+                mock.patch.object(app.config, "ADMIN_CHAT_ID", None):
             application = app.build_application()
         self.assertEqual(len(application.handlers[0]), 11)
         self.assertEqual(len(application.error_handlers), 1)
