@@ -241,12 +241,24 @@ class RouterCheckTest(unittest.TestCase):
 
     def test_offline_shelly_with_router_offline_is_unknown(self):
         checker = self.offline_checker()
-        with mock.patch.object(light_checker, "probe_router", return_value=light_checker.ROUTER_SILENT):
+        with mock.patch.object(light_checker, "probe_router",
+                               side_effect=[light_checker.ROUTER_REFUSED, light_checker.ROUTER_SILENT]):
+            checker.check_router()  # під час старту роутер відповів
             r = checker.get_reading(max_age=30)
         self.assertIsNone(r.has_light)
         self.assertIs(r.internet, False)
         self.assertEqual(r.error, "Немає інтернету в будинку")
         self.assertIsNone(checker._last)  # невідомий стан не кешується
+
+    def test_silence_of_router_that_never_answered_is_not_trusted(self):
+        checker = self.offline_checker()
+        with mock.patch.object(light_checker, "probe_router", return_value=light_checker.ROUTER_SILENT):
+            self.assertEqual(checker.check_router(), (light_checker.ROUTER_SILENT, False))
+            r = checker.get_reading()
+        self.assertFalse(checker.router_trusted)
+        # Працює як без ROUTER_HOST: офлайн-пристрій означає «світла немає» (з 3-хвилинним очікуванням)
+        self.assertIs(r.has_light, False)
+        self.assertIsNone(r.internet)
 
     def test_router_not_probed_when_shelly_online(self):
         checker = make_checker(FakeResponse(200, payload({MAC: device()})), router_host="home.example")[0]

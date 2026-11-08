@@ -132,6 +132,8 @@ class LightChecker:
         self.router_host = router_host
         self.router_port = router_port
         self._router_open_seen = False
+        self._router_seen = False
+        self._untrusted_logged = False
         self._session = session or requests.Session()
         self._lock = threading.Lock()
         self._last: Reading | None = None
@@ -250,7 +252,20 @@ class LightChecker:
         if result == ROUTER_OPEN:
             self._router_open_seen = True
         online = result == ROUTER_OPEN or (result == ROUTER_REFUSED and not self._router_open_seen)
+        if online:
+            self._router_seen = True
         return result, online
+
+    @property
+    def router_trusted(self) -> bool:
+        """Роутер хоч раз відповів від запуску бота, тож його мовчанню можна довіряти.
+
+        Якщо він не відповідав жодного разу, найімовірніше, неправильні
+        налаштування (адреса, порт, провайдер блокує вхідні з'єднання), і тоді
+        мовчання нічого не означає. Без цього запобіжника бот вважав би кожне
+        зникнення Shelly збоєм провайдера й не повідомляв би про відключення.
+        """
+        return self._router_seen
 
     def _check_router(self, reading: Reading) -> Reading:
         """Shelly офлайн: розрізнити відключення світла й зникнення інтернету в будинку."""
@@ -258,6 +273,12 @@ class LightChecker:
         if online:
             logger.info("Shelly офлайн, а роутер відповідає (%s) — світла немає", result)
             return replace(reading, internet=True)
+        if not self.router_trusted:
+            if not self._untrusted_logged:
+                self._untrusted_logged = True
+                logger.warning("Роутер жодного разу не відповідав від запуску — його мовчанню "
+                               "не довіряю, працюю як без ROUTER_HOST")
+            return reading
         logger.warning("Shelly офлайн і роутер не відповідає (%s) — немає інтернету в будинку", result)
         return replace(reading, has_light=None, internet=False, error="Немає інтернету в будинку")
 
