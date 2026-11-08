@@ -56,6 +56,7 @@ def chat_commands(subscribed: bool, admin: bool = False) -> list[BotCommand]:
     commands = [toggle, *DEFAULT_COMMANDS]
     if admin:
         commands.append(BotCommand("router", "Перевірити роутер"))
+        commands.append(BotCommand("testmode", "Тестовий режим сповіщень"))
     return commands
 
 
@@ -194,6 +195,39 @@ def describe_router_result(result: str, target: str) -> str:
     return f"❌ Роутер {target} не відповідає."
 
 
+TESTMODE_USAGE = (
+    "/testmode on — увімкнути: сповіщення про світло отримуєте лише ви\n"
+    "/testmode off — вимкнути: сповіщення знову отримують усі підписники"
+)
+
+
+async def testmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/testmode [on|off] — лише для власника: сповіщення тільки власнику замість підписників."""
+    message = update.effective_message
+    if message is None:
+        return
+    args = [a.lower() for a in (context.args or [])]
+
+    if not args:
+        enabled = await asyncio.to_thread(broadcaster.is_test_mode)
+        state = ("🧪 Тестовий режим увімкнено: сповіщення отримуєте лише ви." if enabled
+                 else "Тестовий режим вимкнено: сповіщення отримують усі підписники.")
+        await message.reply_text(f"{state}\n\n{TESTMODE_USAGE}")
+        return
+    if len(args) != 1 or args[0] not in ("on", "off"):
+        await message.reply_text("⚠️ Не зрозумів команду.\n\n" + TESTMODE_USAGE)
+        return
+
+    enabled = args[0] == "on"
+    await asyncio.to_thread(broadcaster.set_test_mode, enabled)
+    if enabled:
+        await message.reply_text("🧪 Тестовий режим увімкнено. Сповіщення про світло тепер отримуєте "
+                                 "лише ви, підписники нічого не отримують.\n"
+                                 "Вимкнути: /testmode off")
+    else:
+        await message.reply_text("✅ Тестовий режим вимкнено. Сповіщення знову отримують усі підписники.")
+
+
 async def router_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/router — лише для власника: перевірити домашній роутер просто зараз.
 
@@ -284,6 +318,9 @@ async def post_init(app: Application) -> None:
 
     if not config.ADMIN_CHAT_ID:
         logger.info("ADMIN_CHAT_ID не задано — службові сповіщення власнику вимкнені")
+    if await asyncio.to_thread(broadcaster.is_test_mode):
+        logger.warning("🧪 Тестовий режим увімкнено: сповіщення про світло отримує лише власник "
+                       "(вимкнути: /testmode off)")
     await log_router_check(checker)
 
     try:
@@ -337,9 +374,10 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("subscribe", subscribe))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe))
     if config.ADMIN_CHAT_ID:
-        # Лише для власника; для інших /router — невідома команда (спрацює show_menu)
-        app.add_handler(CommandHandler("router", router_command,
-                                       filters=filters.User(user_id=config.ADMIN_CHAT_ID)))
+        # Лише для власника; для інших це невідомі команди (спрацює show_menu)
+        only_admin = filters.User(user_id=config.ADMIN_CHAT_ID)
+        app.add_handler(CommandHandler("router", router_command, filters=only_admin))
+        app.add_handler(CommandHandler("testmode", testmode_command, filters=only_admin))
 
     app.add_handler(MessageHandler(filters.Text([BTN_SUBSCRIBE]), subscribe))
     app.add_handler(MessageHandler(filters.Text([BTN_UNSUBSCRIBE]), unsubscribe))

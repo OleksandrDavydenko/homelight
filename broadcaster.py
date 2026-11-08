@@ -11,6 +11,7 @@ import time
 from telegram import Bot
 from telegram.error import Forbidden, RetryAfter, TelegramError
 
+import config
 import db
 from keyboard import build_keyboard
 from light_checker import (
@@ -55,8 +56,33 @@ async def _send(bot: Bot, user_id: int, text: str, reply_markup=None) -> bool:
     return False
 
 
+TEST_MODE_KEY = "test_mode"
+TEST_MODE_PREFIX = "🧪 Тестовий режим — підписники цього не отримали.\n\n"
+
+
+def is_test_mode() -> bool:
+    """Тестовий режим: сповіщення отримує лише власник (вмикається командою /testmode)."""
+    return db.get_setting(TEST_MODE_KEY) == "1"
+
+
+def set_test_mode(enabled: bool) -> None:
+    db.set_setting(TEST_MODE_KEY, "1" if enabled else "0")
+
+
 async def notify_subscribers(bot: Bot, message: str) -> int:
-    """Розсилає повідомлення всім підписникам. Повертає кількість успішних відправок."""
+    """Розсилає повідомлення всім підписникам. Повертає кількість успішних відправок.
+
+    У тестовому режимі повідомлення отримує лише власник (ADMIN_CHAT_ID).
+    """
+    if await asyncio.to_thread(is_test_mode):
+        if not config.ADMIN_CHAT_ID:
+            logger.warning("Тестовий режим, але ADMIN_CHAT_ID не задано — сповіщення нікому не надіслано")
+            return 0
+        logger.info("Тестовий режим: сповіщення лише власнику: %s", message.splitlines()[0])
+        sent = await _send(bot, config.ADMIN_CHAT_ID, TEST_MODE_PREFIX + message,
+                           reply_markup=build_keyboard(True))
+        return int(sent)
+
     user_ids = await asyncio.to_thread(db.get_all_subscribed_users)
     logger.info("Розсилка %d підписникам: %s", len(user_ids), message.splitlines()[0])
     # Адресати підписані, тож у клавіатурі кнопка «Відписатись».

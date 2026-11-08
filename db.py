@@ -105,6 +105,12 @@ def init_db() -> None:
         cursor.execute("ALTER TABLE light_state ADD COLUMN IF NOT EXISTS light_since BIGINT;")
         # Таблиця разового оголошення від 6.11.2026 більше не потрібна
         cursor.execute("DROP TABLE IF EXISTS announcements;")
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS bot_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+        """)
     _run(query)
     logger.info("Таблиці БД готові")
 
@@ -183,3 +189,21 @@ def save_light_state(state: dict) -> None:
                 offline = EXCLUDED.offline, light_since = EXCLUDED.light_since;
     """, params))
     logger.info("Стан світла збережено: %s", state)
+
+
+def get_setting(key: str) -> str | None:
+    """Значення налаштування бота або None, якщо його не задано."""
+    def query(cursor):
+        cursor.execute("SELECT value FROM bot_settings WHERE key = %s;", (key,))
+        row = cursor.fetchone()
+        return row[0] if row else None
+    return _run(query)
+
+
+def set_setting(key: str, value: str) -> None:
+    """Зберігає налаштування бота."""
+    _run(lambda cursor: cursor.execute("""
+        INSERT INTO bot_settings (key, value) VALUES (%s, %s)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
+    """, (key, value)))
+    logger.info("Налаштування %s = %s", key, value)
