@@ -199,21 +199,52 @@ def command_update(user_id, text="/router"):
     return Update(update_id=1, message=message)
 
 
+class TestmodeCommandTest(unittest.IsolatedAsyncioTestCase):
+    async def run_testmode(self, args=None, current=None):
+        update = make_update()
+        with mock.patch.object(app.db, "get_setting", return_value=current), \
+                mock.patch.object(app.db, "set_setting") as set_setting:
+            await app.testmode_command(update, make_context(args=args))
+        return reply_texts(update), set_setting
+
+    async def test_status(self):
+        texts, set_setting = await self.run_testmode(current="1")
+        self.assertIn("Тестовий режим увімкнено", texts[0])
+        set_setting.assert_not_called()
+        texts, _ = await self.run_testmode(current=None)
+        self.assertIn("Тестовий режим вимкнено", texts[0])
+
+    async def test_on_and_off(self):
+        texts, set_setting = await self.run_testmode(["on"])
+        set_setting.assert_called_once_with("test_mode", "1")
+        self.assertIn("отримуєте лише ви", texts[0])
+        texts, set_setting = await self.run_testmode(["OFF"])
+        set_setting.assert_called_once_with("test_mode", "0")
+        self.assertIn("знову отримують усі підписники", texts[0])
+
+    async def test_bad_argument(self):
+        texts, set_setting = await self.run_testmode(["maybe"])
+        set_setting.assert_not_called()
+        self.assertIn("Не зрозумів", texts[0])
+
+
 class AdminOnlyTest(unittest.TestCase):
-    def router_handlers(self, admin_id):
+    def router_handlers(self, admin_id, command="router"):
         with mock.patch.object(app.config, "TELEGRAM_TOKEN", "123:abc"), \
                 mock.patch.object(app.config, "ADMIN_CHAT_ID", admin_id):
             application = app.build_application()
         return [h for h in application.handlers[0]
-                if isinstance(h, CommandHandler) and "router" in h.commands]
+                if isinstance(h, CommandHandler) and command in h.commands]
 
-    def test_router_command_only_for_admin(self):
-        [handler] = self.router_handlers(777)
-        self.assertTrue(handler.filters.check_update(command_update(777)))
-        self.assertFalse(handler.filters.check_update(command_update(123)))
+    def test_admin_commands_only_for_admin(self):
+        for command in ("router", "testmode"):
+            [handler] = self.router_handlers(777, command)
+            self.assertTrue(handler.filters.check_update(command_update(777, f"/{command}")))
+            self.assertFalse(handler.filters.check_update(command_update(123, f"/{command}")))
 
-    def test_no_router_command_without_admin(self):
+    def test_no_admin_commands_without_admin(self):
         self.assertEqual(self.router_handlers(None), [])
+        self.assertEqual(self.router_handlers(None, "testmode"), [])
 
     def test_admin_menu_has_router(self):
         self.assertIn("router", [c.command for c in app.chat_commands(True, admin=True)])
@@ -241,6 +272,7 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(app.db, "init_db") as init_db, \
                 mock.patch.object(app.db, "get_light_state",
                                   return_value={"has_light": False, "since": 123, "offline": False, "light_since": None}), \
+                mock.patch.object(app.db, "get_setting", return_value=None), \
                 mock.patch.object(app.broadcaster, "monitor_loop", fake_monitor):
             await app.post_init(application)
             await asyncio.wait_for(started.wait(), 1)
@@ -262,13 +294,14 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
                 mock.patch.object(app.db, "init_db"), \
                 mock.patch.object(app.db, "get_light_state", return_value=None), \
                 mock.patch.object(app.db, "get_user_subscription", return_value=True), \
+                mock.patch.object(app.db, "get_setting", return_value="1"), \
                 mock.patch.object(app.broadcaster, "monitor_loop", fake_monitor):
             await app.post_init(application)
             await app.post_stop(application)
         admin_call = application.bot.set_my_commands.call_args_list[-1]
         self.assertEqual(admin_call.kwargs["scope"].chat_id, 777)
         self.assertEqual([c.command for c in admin_call.args[0]],
-                         ["unsubscribe", "check", "help", "router"])
+                         ["unsubscribe", "check", "help", "router", "testmode"])
 
     def test_build_application_registers_handlers(self):
         with mock.patch.object(app.config, "TELEGRAM_TOKEN", "123:abc"), \

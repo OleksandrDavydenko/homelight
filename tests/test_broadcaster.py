@@ -7,6 +7,9 @@ import broadcaster
 from light_checker import Reading, StateTracker
 
 
+NOT_TEST_MODE = mock.Mock(return_value=None)  # тестовий режим вимкнено
+
+
 class FakeBot:
     def __init__(self, failures=None):
         # user_id -> список винятків, які кидати при наступних спробах
@@ -31,6 +34,7 @@ class FakeChecker:
 
 
 @mock.patch.object(broadcaster, "SEND_DELAY", 0)
+@mock.patch.object(broadcaster.db, "get_setting", NOT_TEST_MODE)
 class NotifyTest(unittest.IsolatedAsyncioTestCase):
     async def test_blocked_user_is_unsubscribed(self):
         bot = FakeBot({2: [Forbidden("bot was blocked by the user")]})
@@ -65,6 +69,7 @@ class NotifyTest(unittest.IsolatedAsyncioTestCase):
 
 
 @mock.patch.object(broadcaster, "SEND_DELAY", 0)
+@mock.patch.object(broadcaster.db, "get_setting", NOT_TEST_MODE)
 class RunCheckTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         patches = [
@@ -153,6 +158,7 @@ class AdminWatchTest(unittest.IsolatedAsyncioTestCase):
 
 
 @mock.patch.object(broadcaster, "SEND_DELAY", 0)
+@mock.patch.object(broadcaster.db, "get_setting", NOT_TEST_MODE)
 class RunCheckAdminTest(unittest.IsolatedAsyncioTestCase):
     async def test_subscribers_never_get_internet_alerts(self):
         class Checker:
@@ -168,6 +174,48 @@ class RunCheckAdminTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([chat for chat, _ in bot.sent], [ADMIN])  # лише адміну, один раз
         save.assert_not_called()
         self.assertTrue(tracker.has_light)  # стан світла не змінився
+
+
+@mock.patch.object(broadcaster, "SEND_DELAY", 0)
+class TestModeTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        patches = [
+            mock.patch.object(broadcaster.db, "get_setting", return_value="1"),
+            mock.patch.object(broadcaster.db, "get_all_subscribed_users", return_value=[1, 2, 3]),
+        ]
+        self.setting, self.users = [p.start() for p in patches]
+        for p in patches:
+            self.addCleanup(p.stop)
+
+    async def test_only_admin_gets_alerts(self):
+        bot = FakeBot()
+        with mock.patch.object(broadcaster.config, "ADMIN_CHAT_ID", ADMIN):
+            sent = await broadcaster.notify_subscribers(bot, "🔴 СВІТЛО ПРОПАЛО!")
+        self.assertEqual(sent, 1)
+        self.assertEqual(bot.sent, [(ADMIN, broadcaster.TEST_MODE_PREFIX + "🔴 СВІТЛО ПРОПАЛО!")])
+        self.users.assert_not_called()
+        self.setting.assert_called_once_with("test_mode")
+
+    async def test_nobody_gets_alerts_without_admin(self):
+        bot = FakeBot()
+        with mock.patch.object(broadcaster.config, "ADMIN_CHAT_ID", None):
+            sent = await broadcaster.notify_subscribers(bot, "msg")
+        self.assertEqual((sent, bot.sent), (0, []))
+
+    async def test_off_means_everybody(self):
+        self.setting.return_value = "0"
+        bot = FakeBot()
+        with mock.patch.object(broadcaster.config, "ADMIN_CHAT_ID", ADMIN):
+            sent = await broadcaster.notify_subscribers(bot, "msg")
+        self.assertEqual(sent, 3)
+        self.assertEqual([chat for chat, _ in bot.sent], [1, 2, 3])
+
+    def test_set_test_mode(self):
+        with mock.patch.object(broadcaster.db, "set_setting") as set_setting:
+            broadcaster.set_test_mode(True)
+            broadcaster.set_test_mode(False)
+        self.assertEqual(set_setting.call_args_list,
+                         [mock.call("test_mode", "1"), mock.call("test_mode", "0")])
 
 
 if __name__ == "__main__":
