@@ -23,8 +23,9 @@ def make_update(user_id=7, first_name="Олена", text=None):
     )
 
 
-def make_context(**bot_data):
-    return SimpleNamespace(bot=SimpleNamespace(set_my_commands=mock.AsyncMock()), bot_data=bot_data)
+def make_context(args=None, **bot_data):
+    return SimpleNamespace(bot=SimpleNamespace(set_my_commands=mock.AsyncMock()),
+                           bot_data=bot_data, args=args)
 
 
 def first_button(reply_text_mock):
@@ -106,8 +107,8 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
         update_sub.assert_not_called()
 
 
-def router_checker(result=None, online=True, host="195.0.2.10"):
-    checker = mock.Mock(router_host=host, router_port=80)
+def router_checker(result=None, online=True, host="195.0.2.10", trusted=True):
+    checker = mock.Mock(router_host=host, router_port=80, router_trusted=trusted)
     checker.check_router.return_value = (result, online)
     return checker
 
@@ -117,9 +118,9 @@ def reply_texts(update):
 
 
 class RouterCommandTest(unittest.IsolatedAsyncioTestCase):
-    async def run_router(self, checker):
+    async def run_router(self, checker, args=None):
         update = make_update()
-        await app.router_command(update, make_context(checker=checker))
+        await app.router_command(update, make_context(args=args, checker=checker))
         return reply_texts(update)
 
     async def test_not_configured(self):
@@ -150,6 +151,43 @@ class RouterCommandTest(unittest.IsolatedAsyncioTestCase):
         texts = await self.run_router(router_checker(light_checker.ROUTER_SILENT, online=False))
         self.assertIn("❌ Роутер 195.0.2.10:80 не відповідає.", texts[1])
         self.assertTrue(texts[1].endswith("інтернет у будинку немає."))
+
+    async def test_silent_router_that_never_answered_is_not_trusted(self):
+        checker = router_checker(light_checker.ROUTER_SILENT, online=False, trusted=False)
+        texts = await self.run_router(checker)
+        self.assertIn("не довіряє його мовчанню", texts[1])
+        self.assertNotIn("інтернет у будинку немає", texts[1])
+
+    async def test_one_off_port(self):
+        checker = router_checker()
+        with mock.patch.object(app, "probe_router", return_value=light_checker.ROUTER_REFUSED) as probe:
+            texts = await self.run_router(checker, args=["8443"])
+        probe.assert_called_once_with("195.0.2.10", 8443)
+        checker.check_router.assert_not_called()  # стан перевірки бота не чіпаємо
+        self.assertIn("✅ Роутер 195.0.2.10:8443 відповідає відмовою", texts[1])
+        self.assertIn("ROUTER_HOST=195.0.2.10 і ROUTER_PORT=8443", texts[1])
+        self.assertIn("разова перевірка", texts[1])
+
+    async def test_one_off_host_and_port_without_router_host(self):
+        with mock.patch.object(app, "probe_router", return_value=light_checker.ROUTER_SILENT) as probe:
+            texts = await self.run_router(router_checker(host=None), args=["198.51.100.7", "22"])
+        probe.assert_called_once_with("198.51.100.7", 22)
+        self.assertIn("❌ Роутер 198.51.100.7:22 не відповідає.", texts[1])
+        self.assertNotIn("ROUTER_PORT=", texts[1])
+
+    async def test_bad_arguments(self):
+        for args in (["99999"], ["host", "port"], ["a", "1", "b"]):
+            with mock.patch.object(app, "probe_router") as probe:
+                texts = await self.run_router(router_checker(), args=args)
+            probe.assert_not_called()
+            self.assertIn("Не вдалося розібрати", texts[0])
+
+    def test_parse_router_args(self):
+        parse = app.parse_router_args
+        self.assertEqual(parse([], "h", 80), ("h", 80))
+        self.assertEqual(parse(["8443"], "h", 80), ("h", 8443))
+        self.assertEqual(parse(["other"], "h", 80), ("other", 80))
+        self.assertEqual(parse(["other", "22"], None, 80), ("other", 22))
 
 
 def command_update(user_id, text="/router"):

@@ -23,9 +23,11 @@ from keyboard import BTN_CHECK, BTN_INFO, BTN_SUBSCRIBE, BTN_UNSUBSCRIBE, build_
 from light_checker import (
     ROUTER_OPEN,
     ROUTER_REFUSED,
+    ROUTER_SILENT,
     LightChecker,
     StateTracker,
     format_status_message,
+    probe_router,
 )
 
 logger = logging.getLogger(__name__)
@@ -158,36 +160,90 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await message.reply_text("Оберіть дію з клавіатури:", reply_markup=await keyboard_for(user.id))
 
 
+ROUTER_USAGE = (
+    "Як користуватися:\n"
+    "/router — перевірити роутер з налаштувань (ROUTER_HOST, ROUTER_PORT)\n"
+    "/router 8443 — перевірити інший порт\n"
+    "/router 195.38.8.114 8443 — перевірити довільну адресу й порт\n\n"
+    "Перевірка з адресою чи портом разова: налаштування бота не змінюються."
+)
+
+
+def parse_router_args(args: list[str], host: str | None, port: int) -> tuple[str | None, int]:
+    """Аргументи /router: [] | [порт] | [адреса] | [адреса, порт]. ValueError — якщо неправильні."""
+    def parse_port(text: str) -> int:
+        value = int(text)
+        if not 1 <= value <= 65535:
+            raise ValueError(text)
+        return value
+
+    if len(args) > 2:
+        raise ValueError(args)
+    if len(args) == 2:
+        return args[0], parse_port(args[1])
+    if len(args) == 1:
+        return (host, parse_port(args[0])) if args[0].isdigit() else (args[0], port)
+    return host, port
+
+
+def describe_router_result(result: str, target: str) -> str:
+    if result == ROUTER_OPEN:
+        return f"✅ Роутер {target} відповідає: порт відкритий (з'єднання встановлено)."
+    if result == ROUTER_REFUSED:
+        return f"✅ Роутер {target} відповідає відмовою (порт закритий)."
+    return f"❌ Роутер {target} не відповідає."
+
+
 async def router_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/router — лише для власника: перевірити домашній роутер просто зараз.
 
-    Нічого не змінює й нікому не розсилає, тож нею можна безпечно перевірити
-    налаштування (наприклад, вийнявши кабель інтернету з роутера).
+    Нічого не розсилає, тож нею можна безпечно перевірити налаштування
+    (наприклад, вийнявши кабель інтернету з роутера) або підібрати порт.
     """
     message = update.effective_message
     if message is None:
         return
     checker: LightChecker = context.bot_data["checker"]
-    if not checker.router_host:
-        await message.reply_text("ℹ️ ROUTER_HOST не задано в налаштуваннях Heroku — "
-                                 "перевірка роутера вимкнена.")
+    args = context.args or []
+    try:
+        host, port = parse_router_args(args, checker.router_host, checker.router_port)
+    except ValueError:
+        await message.reply_text("⚠️ Не вдалося розібрати адресу чи порт.\n\n" + ROUTER_USAGE)
+        return
+    if not host:
+        await message.reply_text("ℹ️ ROUTER_HOST не задано в налаштуваннях Heroku.\n\n" + ROUTER_USAGE)
         return
 
     await message.reply_text("🔄 Перевіряю роутер...")
+    target = f"{host}:{port}"
+
+    if args:
+        # Разова перевірка іншої адреси чи порту: стан перевірки бота не змінюється
+        result = await asyncio.to_thread(probe_router, host, port)
+        text = describe_router_result(result, target)
+        if result != ROUTER_SILENT:
+            text += (f"\n\nЩоб бот перевіряв роутер саме так, задайте в Heroku "
+                     f"ROUTER_HOST={host} і ROUTER_PORT={port}.")
+        text += "\n\nЦе разова перевірка: налаштування бота не змінено."
+        await message.reply_text(text)
+        return
+
     result, online = await asyncio.to_thread(checker.check_router)
-    target = f"{checker.router_host}:{checker.router_port}"
+    text = describe_router_result(result, target)
     if result == ROUTER_OPEN:
-        text = (f"✅ Роутер {target} відповідає: порт відкритий (з'єднання встановлено).\n"
-                "Це найнадійніший режим.")
-    elif result == ROUTER_REFUSED:
-        text = f"✅ Роутер {target} відповідає відмовою (порт закритий)."
-        if not online:
-            text += ("\nАле раніше цей порт був відкритий, тож бот вважає таку відмову "
-                     "відповіддю обладнання провайдера, а не вашого роутера.")
+        text += "\nЦе найнадійніший режим."
+    elif result == ROUTER_REFUSED and not online:
+        text += ("\nАле раніше цей порт був відкритий, тож бот вважає таку відмову "
+                 "відповіддю обладнання провайдера, а не вашого роутера.")
+
+    if online:
+        conclusion = "інтернет у будинку є."
+    elif checker.router_trusted:
+        conclusion = "інтернет у будинку немає."
     else:
-        text = f"❌ Роутер {target} не відповідає."
-    text += f"\n\nВисновок бота: інтернет у будинку {'є' if online else 'немає'}."
-    await message.reply_text(text)
+        conclusion = ("роутер жодного разу не відповідав від запуску, тож бот не довіряє "
+                      "його мовчанню й працює так, ніби ROUTER_HOST не задано.")
+    await message.reply_text(f"{text}\n\nВисновок бота: {conclusion}")
 
 
 async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -262,7 +318,8 @@ async def log_router_check(checker: LightChecker) -> None:
                     "відкрити порт (віддалене керування роутером)", port)
     else:
         logger.warning("Роутер (порт %s) не відповідає: перевірте ROUTER_HOST/ROUTER_PORT "
-                       "або ввімкніть віддалене керування роутером", port)
+                       "або ввімкніть віддалене керування роутером. Поки роутер жодного разу "
+                       "не відповів, бот не довіряє його мовчанню", port)
 
 
 async def post_stop(app: Application) -> None:
