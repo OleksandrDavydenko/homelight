@@ -50,7 +50,7 @@ CHECK_TIMEOUT = 8
 
 ABOUT = "Я бот для перевірки наявності електроенергії в будинку на Полтавській 64."
 
-# Які оновлення отримувати від Telegram (CALLBACK_QUERY — натискання кнопок під /admins)
+# Які оновлення отримувати від Telegram (CALLBACK_QUERY — натискання кнопок під /special)
 ALLOWED_UPDATES = [Update.MESSAGE, Update.MY_CHAT_MEMBER, Update.CALLBACK_QUERY]
 
 DEFAULT_COMMANDS = [
@@ -71,7 +71,7 @@ def chat_commands(subscribed: bool, admin: bool = False) -> list[BotCommand]:
     if admin:
         commands.append(BotCommand("router", "Перевірити роутер"))
         commands.append(BotCommand("testmode", "Тестовий режим сповіщень"))
-        commands.append(BotCommand("admins", "Адміни для повідомлень про інтернет"))
+        commands.append(BotCommand("special", "Спеціальні користувачі"))
     return commands
 
 
@@ -305,11 +305,11 @@ async def router_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await message.reply_text(text)
 
 
-# ---------- /admins: хто отримує повідомлення про інтернет ----------
+# ---------- /special: спеціальні користувачі (отримують повідомлення про інтернет) ----------
 
 ADD_PAGE_SIZE = 8  # скільки користувачів показувати на одній сторінці «➕ Додати»
-WELCOME_ADMIN = ("👋 Вас додано: ви отримуватимете повідомлення, коли вдома зникає "
-                 "й повертається інтернет.")
+WELCOME_ADMIN = ("👋 Вас додано до спеціальних користувачів: ви отримуватимете повідомлення, "
+                 "коли вдома зникає й повертається інтернет.")
 WELCOME_ADMIN_SUBSCRIBE = ("\n\nВони надходять лише тим, хто підписаний на сповіщення про світло, — "
                            "натисніть «🔔 Підписатись».")
 NOT_SUBSCRIBED_MARK = "🔕"
@@ -324,7 +324,7 @@ def user_label(user_id: int, name: str | None, username: str | None = None) -> s
 
 
 async def remember_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Запам'ятовує ім'я та @username кожного, хто взаємодіє з ботом (для /admins).
+    """Запам'ятовує ім'я та @username кожного, хто взаємодіє з ботом (для /special).
 
     Працює перед усіма іншими обробниками. У БД пише лише тоді, коли щось
     змінилося з минулого разу (або вперше після запуску бота).
@@ -344,7 +344,7 @@ async def remember_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def admins_view() -> tuple[str, InlineKeyboardMarkup]:
-    """Список отримувачів із кнопками «❌» для адмінів з БД і «➕ Додати»."""
+    """Спеціальні користувачі з кнопками «❌» (для доданих через бота) і «➕ Додати»."""
     db_ids = await asyncio.to_thread(admins.load_ids)
     heroku_ids = [i for i in config.INTERNET_ALERT_CHAT_IDS if i not in db_ids]
     others = [i for i in dict.fromkeys(db_ids + heroku_ids) if i != config.ADMIN_CHAT_ID]
@@ -354,7 +354,7 @@ async def admins_view() -> tuple[str, InlineKeyboardMarkup]:
     def mark(user_id: int) -> str:
         return "" if user_id in subscribed else f" {NOT_SUBSCRIBED_MARK}"
 
-    lines = ["👥 Хто отримує повідомлення про інтернет:",
+    lines = ["👥 Спеціальні користувачі\nОтримують повідомлення про зникнення й відновлення інтернету вдома:",
              f"• Ви (власник){mark(config.ADMIN_CHAT_ID)}"]
     buttons = []
     for user_id in others:
@@ -387,7 +387,8 @@ async def add_admin_view(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
                   if users else set())
 
     if users:
-        text = "Кого додати? Людина має спершу натиснути /start у боті. Нові користувачі — вгорі."
+        text = ("Кого додати до спеціальних користувачів? Людина має спершу натиснути /start у боті. "
+                "Нові користувачі — вгорі.")
         if len(subscribed) < len(users):
             text += (f"\n{NOT_SUBSCRIBED_MARK} — ще не підписані на сповіщення про світло: "
                      "повідомлення про інтернет отримуватимуть, коли підпишуться.")
@@ -407,12 +408,12 @@ async def add_admin_view(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
         nav.append(InlineKeyboardButton("Далі ➡️", callback_data=f"adm:add:{page + 1}"))
     if nav:
         buttons.append(nav)
-    buttons.append([InlineKeyboardButton("↩️ До списку адмінів", callback_data="adm:list")])
+    buttons.append([InlineKeyboardButton("↩️ Назад до списку", callback_data="adm:list")])
     return text, InlineKeyboardMarkup(buttons)
 
 
 async def admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/admins — лише для власника: хто отримує повідомлення про інтернет."""
+    """/special (або /admins) — лише для власника: спеціальні користувачі."""
     message = update.effective_message
     if message is None:
         return
@@ -421,7 +422,7 @@ async def admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def admins_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Кнопки під /admins: adm:list | adm:add[:<сторінка>] | adm:pick:<id> | adm:del:<id>."""
+    """Кнопки під /special: adm:list | adm:add[:<сторінка>] | adm:pick:<id> | adm:del:<id>."""
     query = update.callback_query
     if query is None:
         return
@@ -450,7 +451,7 @@ async def admins_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 try:
                     await context.bot.send_message(chat_id=user_id, text=welcome)
                 except TelegramError as e:
-                    logger.warning("Не вдалося привітати нового адміна %s: %s", user_id, e)
+                    logger.warning("Не вдалося привітати нового спеціального користувача %s: %s", user_id, e)
             popup = (f"✅ {label} тепер отримує повідомлення про інтернет" if is_subscribed
                      else f"✅ {label} додано. Повідомлення отримуватиме, коли підпишеться")
         else:
@@ -509,7 +510,7 @@ async def post_init(app: Application) -> None:
     internet_watch = broadcaster.InternetWatch(admins.recipients(db_admin_ids))
     app.bot_data["checker"] = checker
     app.bot_data["tracker"] = tracker
-    # /admins змінює список отримувачів на льоту, без перезапуску
+    # /special змінює список отримувачів на льоту, без перезапуску
     app.bot_data["internet_watch"] = internet_watch
     app.bot_data["monitor_task"] = asyncio.create_task(
         broadcaster.monitor_loop(app.bot, checker, tracker, admin_watch, internet_watch),
@@ -568,7 +569,7 @@ async def post_stop(app: Application) -> None:
 
 
 def register_handlers(app: Application) -> None:
-    # Група -1 виконується перед усіма: запам'ятати ім'я та @username для /admins
+    # Група -1 виконується перед усіма: запам'ятати ім'я та @username для /special
     app.add_handler(TypeHandler(Update, remember_user), group=-1)
 
     app.add_handler(CommandHandler("start", start))
@@ -581,8 +582,9 @@ def register_handlers(app: Application) -> None:
         only_admin = filters.User(user_id=config.ADMIN_CHAT_ID)
         app.add_handler(CommandHandler("router", router_command, filters=only_admin))
         app.add_handler(CommandHandler("testmode", testmode_command, filters=only_admin))
-        app.add_handler(CommandHandler("admins", admins_command, filters=only_admin))
-        # Кнопки під /admins; хто натиснув, перевіряється в самому обробнику
+        # /admins — стара назва команди, лишається для зручності
+        app.add_handler(CommandHandler(["special", "admins"], admins_command, filters=only_admin))
+        # Кнопки під /special; хто натиснув, перевіряється в самому обробнику
         app.add_handler(CallbackQueryHandler(admins_callback, pattern=r"^adm:"))
 
     app.add_handler(MessageHandler(filters.Text([BTN_SUBSCRIBE]), subscribe))

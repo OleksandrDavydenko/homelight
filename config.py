@@ -41,7 +41,7 @@ INTERNET_ALERT_CHAT_IDS, _INVALID_INTERNET_ALERT_IDS = parse_chat_ids(
 
 
 def internet_alert_chat_ids() -> list[int]:
-    """Хто отримує повідомлення про інтернет: власник і додаткові адміни, без дублікатів."""
+    """Хто отримує повідомлення про інтернет: власник і спеціальні користувачі, без дублікатів."""
     ids = ([ADMIN_CHAT_ID] if ADMIN_CHAT_ID else []) + INTERNET_ALERT_CHAT_IDS
     return list(dict.fromkeys(ids))
 
