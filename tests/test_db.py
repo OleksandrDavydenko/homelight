@@ -96,6 +96,15 @@ class DbTest(unittest.TestCase):
         self.assertEqual(db.get_light_state(),
                          {"has_light": True, "since": 77, "offline": False, "light_since": None})
 
+    def test_recent_users_and_names(self):
+        for telegram_id, name in ((111, "Олена"), (222, "Петро"), (333, "Іван")):
+            db.ensure_user(telegram_id, name)
+        self.assertEqual(db.get_recent_users(), [(333, "Іван"), (222, "Петро"), (111, "Олена")])
+        self.assertEqual(db.get_recent_users(limit=2), [(333, "Іван"), (222, "Петро")])
+        self.assertEqual(db.get_recent_users(exclude=[333, 111]), [(222, "Петро")])
+        self.assertEqual(db.get_user_names([111, 333, 999]), {111: "Олена", 333: "Іван"})
+        self.assertEqual(db.get_user_names([]), {})
+
     def test_settings_roundtrip(self):
         self.assertIsNone(db.get_setting("test_mode"))
         db.set_setting("test_mode", "1")

@@ -207,3 +207,32 @@ def set_setting(key: str, value: str) -> None:
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
     """, (key, value)))
     logger.info("Налаштування %s = %s", key, value)
+
+
+def get_recent_users(limit: int = 10, exclude=()) -> list[tuple[int, str]]:
+    """Останні користувачі, які натискали /start: [(telegram_id, first_name)], новіші першими."""
+    exclude = list(exclude) or [0]
+
+    def query(cursor):
+        cursor.execute("""
+            SELECT telegram_id, COALESCE(first_name, '') FROM usersLightBot
+            WHERE NOT (telegram_id = ANY(%s))
+            ORDER BY id DESC LIMIT %s;
+        """, (exclude, limit))
+        return [(int(row[0]), row[1]) for row in cursor.fetchall()]
+    return _run(query)
+
+
+def get_user_names(ids) -> dict[int, str]:
+    """Імена користувачів за telegram_id (кого немає в БД — немає й у словнику)."""
+    ids = list(ids)
+    if not ids:
+        return {}
+
+    def query(cursor):
+        cursor.execute(
+            "SELECT telegram_id, COALESCE(first_name, '') FROM usersLightBot WHERE telegram_id = ANY(%s);",
+            (ids,),
+        )
+        return {int(row[0]): row[1] for row in cursor.fetchall()}
+    return _run(query)

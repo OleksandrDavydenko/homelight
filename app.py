@@ -3,12 +3,20 @@ import contextlib
 import logging
 import time
 
-from telegram import BotCommand, BotCommandScopeChat, ReplyKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    BotCommandScopeChat,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ChatMemberStatus, ChatType
-from telegram.error import TelegramError
+from telegram.error import BadRequest, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
     ChatMemberHandler,
     CommandHandler,
     ContextTypes,
@@ -16,6 +24,7 @@ from telegram.ext import (
     filters,
 )
 
+import admins
 import broadcaster
 import config
 import db
@@ -40,6 +49,9 @@ CHECK_TIMEOUT = 8
 
 ABOUT = "Я бот для перевірки наявності електроенергії в будинку на Полтавській 64."
 
+# Які оновлення отримувати від Telegram (CALLBACK_QUERY — натискання кнопок під /admins)
+ALLOWED_UPDATES = [Update.MESSAGE, Update.MY_CHAT_MEMBER, Update.CALLBACK_QUERY]
+
 DEFAULT_COMMANDS = [
     BotCommand("check", "Перевірити наявність світла"),
     BotCommand("help", "Показати довідку"),
@@ -58,6 +70,7 @@ def chat_commands(subscribed: bool, admin: bool = False) -> list[BotCommand]:
     if admin:
         commands.append(BotCommand("router", "Перевірити роутер"))
         commands.append(BotCommand("testmode", "Тестовий режим сповіщень"))
+        commands.append(BotCommand("admins", "Адміни для повідомлень про інтернет"))
     return commands
 
 
@@ -291,6 +304,115 @@ async def router_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await message.reply_text(text)
 
 
+# ---------- /admins: хто отримує повідомлення про інтернет ----------
+
+ADD_CANDIDATES_LIMIT = 10
+WELCOME_ADMIN = ("👋 Вас додано: ви отримуватимете повідомлення, коли вдома зникає "
+                 "й повертається інтернет.")
+
+
+def user_label(user_id: int, name: str | None) -> str:
+    """Ім'я та останні цифри ID, щоб розрізнити однакові імена."""
+    return f"{(name or '').strip() or 'Без імені'} (…{str(user_id)[-4:]})"
+
+
+async def admins_view() -> tuple[str, InlineKeyboardMarkup]:
+    """Список отримувачів із кнопками «❌» для адмінів з БД і «➕ Додати»."""
+    db_ids = await asyncio.to_thread(admins.load_ids)
+    heroku_ids = [i for i in config.INTERNET_ALERT_CHAT_IDS if i not in db_ids]
+    others = [i for i in dict.fromkeys(db_ids + heroku_ids) if i != config.ADMIN_CHAT_ID]
+    names = await asyncio.to_thread(db.get_user_names, others) if others else {}
+
+    lines = ["👥 Хто отримує повідомлення про інтернет:", "• Ви (власник)"]
+    buttons = []
+    for user_id in others:
+        label = user_label(user_id, names.get(user_id))
+        if user_id in db_ids:
+            lines.append(f"• {label}")
+            buttons.append([InlineKeyboardButton(f"❌ {label}", callback_data=f"adm:del:{user_id}")])
+        else:
+            lines.append(f"• {label} — задано в Heroku")
+    if not others:
+        lines.append("\nЩоб додати людину, попросіть її натиснути /start у боті, "
+                     "а потім натисніть «➕ Додати».")
+    buttons.append([InlineKeyboardButton("➕ Додати", callback_data="adm:add")])
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+async def add_admin_view() -> tuple[str, InlineKeyboardMarkup]:
+    """Останні користувачі, які ще не отримують повідомлень про інтернет."""
+    current = admins.recipients(await asyncio.to_thread(admins.load_ids))
+    users = await asyncio.to_thread(db.get_recent_users, ADD_CANDIDATES_LIMIT, current)
+    if users:
+        text = "Кого додати? Людина має спершу натиснути /start у боті."
+    else:
+        text = "Поки немає кого додати: попросіть людину натиснути /start у боті."
+    buttons = [[InlineKeyboardButton(user_label(uid, name), callback_data=f"adm:pick:{uid}")]
+               for uid, name in users]
+    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="adm:list")])
+    return text, InlineKeyboardMarkup(buttons)
+
+
+async def admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/admins — лише для власника: хто отримує повідомлення про інтернет."""
+    message = update.effective_message
+    if message is None:
+        return
+    text, markup = await admins_view()
+    await message.reply_text(text, reply_markup=markup)
+
+
+async def admins_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопки під /admins: adm:list | adm:add | adm:pick:<id> | adm:del:<id>."""
+    query = update.callback_query
+    if query is None:
+        return
+    if not is_admin(query.from_user.id):
+        await query.answer("Недоступно")
+        return
+
+    parts = (query.data or "").split(":")
+    action = parts[1] if len(parts) > 1 else "list"
+    popup = None
+
+    if action in ("pick", "del"):
+        try:
+            user_id = int(parts[2])
+        except (IndexError, ValueError):
+            await query.answer()
+            return
+        ids = await asyncio.to_thread(admins.load_ids)
+        names = await asyncio.to_thread(db.get_user_names, [user_id])
+        label = user_label(user_id, names.get(user_id))
+        if action == "pick":
+            if user_id not in ids and user_id != config.ADMIN_CHAT_ID:
+                ids.append(user_id)
+                try:
+                    await context.bot.send_message(chat_id=user_id, text=WELCOME_ADMIN)
+                except TelegramError as e:
+                    logger.warning("Не вдалося привітати нового адміна %s: %s", user_id, e)
+            popup = f"✅ {label} тепер отримує повідомлення про інтернет"
+        else:
+            ids = [i for i in ids if i != user_id]
+            popup = f"Видалено: {label}"
+        await asyncio.to_thread(admins.save_ids, ids)
+        watch = context.bot_data.get("internet_watch")
+        if watch is not None:
+            watch.chat_ids = admins.recipients(ids)
+        text, markup = await admins_view()
+    elif action == "add":
+        text, markup = await add_admin_view()
+    else:
+        text, markup = await admins_view()
+
+    await query.answer(popup)
+    try:
+        await query.edit_message_text(text, reply_markup=markup)
+    except BadRequest as e:
+        if "not modified" not in str(e).lower():
+            raise
+
+
 async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Користувач заблокував бота — відписуємо, щоб не слати йому сповіщення."""
     change = update.my_chat_member
@@ -321,9 +443,12 @@ async def post_init(app: Application) -> None:
     checker = LightChecker()
     tracker = StateTracker.from_dict(state)
     admin_watch = broadcaster.AdminWatch(config.ADMIN_CHAT_ID)
-    internet_watch = broadcaster.InternetWatch(config.internet_alert_chat_ids())
+    db_admin_ids = await asyncio.to_thread(admins.load_ids)
+    internet_watch = broadcaster.InternetWatch(admins.recipients(db_admin_ids))
     app.bot_data["checker"] = checker
     app.bot_data["tracker"] = tracker
+    # /admins змінює список отримувачів на льоту, без перезапуску
+    app.bot_data["internet_watch"] = internet_watch
     app.bot_data["monitor_task"] = asyncio.create_task(
         broadcaster.monitor_loop(app.bot, checker, tracker, admin_watch, internet_watch),
         name="light-monitor",
@@ -391,6 +516,9 @@ def register_handlers(app: Application) -> None:
         only_admin = filters.User(user_id=config.ADMIN_CHAT_ID)
         app.add_handler(CommandHandler("router", router_command, filters=only_admin))
         app.add_handler(CommandHandler("testmode", testmode_command, filters=only_admin))
+        app.add_handler(CommandHandler("admins", admins_command, filters=only_admin))
+        # Кнопки під /admins; хто натиснув, перевіряється в самому обробнику
+        app.add_handler(CallbackQueryHandler(admins_callback, pattern=r"^adm:"))
 
     app.add_handler(MessageHandler(filters.Text([BTN_SUBSCRIBE]), subscribe))
     app.add_handler(MessageHandler(filters.Text([BTN_UNSUBSCRIBE]), unsubscribe))
@@ -429,7 +557,7 @@ def main() -> None:
 
     app = build_application()
     logger.info("🤖 Бот запущено")
-    app.run_polling(allowed_updates=[Update.MESSAGE, Update.MY_CHAT_MEMBER])
+    app.run_polling(allowed_updates=ALLOWED_UPDATES)
 
 
 if __name__ == "__main__":
