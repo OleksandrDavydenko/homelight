@@ -310,6 +310,9 @@ async def router_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 ADD_PAGE_SIZE = 8  # скільки користувачів показувати на одній сторінці «➕ Додати»
 WELCOME_ADMIN = ("👋 Вас додано: ви отримуватимете повідомлення, коли вдома зникає "
                  "й повертається інтернет.")
+WELCOME_ADMIN_SUBSCRIBE = ("\n\nВони надходять лише тим, хто підписаний на сповіщення про світло, — "
+                           "натисніть «🔔 Підписатись».")
+NOT_SUBSCRIBED_MARK = "🔕"
 
 
 def user_label(user_id: int, name: str | None, username: str | None = None) -> str:
@@ -346,16 +349,24 @@ async def admins_view() -> tuple[str, InlineKeyboardMarkup]:
     heroku_ids = [i for i in config.INTERNET_ALERT_CHAT_IDS if i not in db_ids]
     others = [i for i in dict.fromkeys(db_ids + heroku_ids) if i != config.ADMIN_CHAT_ID]
     users = await asyncio.to_thread(db.get_users, others) if others else {}
+    subscribed = await asyncio.to_thread(db.filter_subscribed, [config.ADMIN_CHAT_ID, *others])
 
-    lines = ["👥 Хто отримує повідомлення про інтернет:", "• Ви (власник)"]
+    def mark(user_id: int) -> str:
+        return "" if user_id in subscribed else f" {NOT_SUBSCRIBED_MARK}"
+
+    lines = ["👥 Хто отримує повідомлення про інтернет:",
+             f"• Ви (власник){mark(config.ADMIN_CHAT_ID)}"]
     buttons = []
     for user_id in others:
         label = user_label(user_id, *users.get(user_id, ("", None)))
         if user_id in db_ids:
-            lines.append(f"• {label}")
+            lines.append(f"• {label}{mark(user_id)}")
             buttons.append([InlineKeyboardButton(f"❌ {label}", callback_data=f"adm:del:{user_id}")])
         else:
-            lines.append(f"• {label} (задано в Heroku)")
+            lines.append(f"• {label}{mark(user_id)} (задано в Heroku)")
+    if any(mark(i) for i in [config.ADMIN_CHAT_ID, *others]):
+        lines.append(f"\n{NOT_SUBSCRIBED_MARK} — не підписані на сповіщення про світло, тому "
+                     "повідомлень про інтернет не отримують.")
     if not others:
         lines.append("\nЩоб додати людину, попросіть її натиснути /start у боті, "
                      "а потім натисніть «➕ Додати».")
@@ -372,14 +383,22 @@ async def add_admin_view(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
     users = await asyncio.to_thread(db.get_recent_users, ADD_PAGE_SIZE, current,
                                     page * ADD_PAGE_SIZE)
 
+    subscribed = (await asyncio.to_thread(db.filter_subscribed, [u[0] for u in users])
+                  if users else set())
+
     if users:
         text = "Кого додати? Людина має спершу натиснути /start у боті. Нові користувачі — вгорі."
+        if len(subscribed) < len(users):
+            text += (f"\n{NOT_SUBSCRIBED_MARK} — ще не підписані на сповіщення про світло: "
+                     "повідомлення про інтернет отримуватимуть, коли підпишуться.")
         if pages > 1:
             text += f"\n\nСторінка {page + 1} з {pages} (усього {total})."
     else:
         text = "Поки немає кого додати: попросіть людину натиснути /start у боті."
 
-    buttons = [[InlineKeyboardButton(user_label(uid, name, username), callback_data=f"adm:pick:{uid}")]
+    buttons = [[InlineKeyboardButton(
+                    ("" if uid in subscribed else f"{NOT_SUBSCRIBED_MARK} ") + user_label(uid, name, username),
+                    callback_data=f"adm:pick:{uid}")]
                for uid, name, username in users]
     nav = []
     if page > 0:
@@ -424,13 +443,16 @@ async def admins_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         users = await asyncio.to_thread(db.get_users, [user_id])
         label = user_label(user_id, *users.get(user_id, ("", None)))
         if action == "pick":
+            is_subscribed = bool(await asyncio.to_thread(db.filter_subscribed, [user_id]))
             if user_id not in ids and user_id != config.ADMIN_CHAT_ID:
                 ids.append(user_id)
+                welcome = WELCOME_ADMIN + ("" if is_subscribed else WELCOME_ADMIN_SUBSCRIBE)
                 try:
-                    await context.bot.send_message(chat_id=user_id, text=WELCOME_ADMIN)
+                    await context.bot.send_message(chat_id=user_id, text=welcome)
                 except TelegramError as e:
                     logger.warning("Не вдалося привітати нового адміна %s: %s", user_id, e)
-            popup = f"✅ {label} тепер отримує повідомлення про інтернет"
+            popup = (f"✅ {label} тепер отримує повідомлення про інтернет" if is_subscribed
+                     else f"✅ {label} додано. Повідомлення отримуватиме, коли підпишеться")
         else:
             ids = [i for i in ids if i != user_id]
             popup = f"Видалено: {label}"

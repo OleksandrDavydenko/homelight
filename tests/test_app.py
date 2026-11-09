@@ -258,6 +258,7 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.stored = "111"
         self.recent_users = [333, 222, 111, 777]
+        self.subscribed = {777, 111, 222, 333}
         patches = [
             mock.patch.object(app.config, "ADMIN_CHAT_ID", 777),
             mock.patch.object(app.config, "INTERNET_ALERT_CHAT_IDS", [222]),
@@ -268,6 +269,8 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
                                                        for i in ids if i in NAMES}),
             mock.patch.object(app.db, "get_recent_users", side_effect=self.recent),
             mock.patch.object(app.db, "count_users", side_effect=self.count),
+            mock.patch.object(app.db, "filter_subscribed",
+                              side_effect=lambda ids: {i for i in ids if i in self.subscribed}),
         ]
         for p in patches:
             p.start()
@@ -310,6 +313,34 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.buttons(call.kwargs["reply_markup"]),
                          [("❌ Олена · 111", "adm:del:111"), ("➕ Додати", "adm:add")])
 
+    async def test_unsubscribed_are_marked_owner_too(self):
+        self.subscribed = {222}
+        update = make_update(user_id=777)
+        await app.admins_command(update, make_context())
+        self.assertEqual(update.effective_message.reply_text.call_args.args[0],
+                         "👥 Хто отримує повідомлення про інтернет:\n"
+                         "• Ви (власник) 🔕\n"
+                         "• Олена · 111 🔕\n"
+                         "• Петро · 222 (задано в Heroku)\n"
+                         "\n🔕 — не підписані на сповіщення про світло, тому повідомлень про "
+                         "інтернет не отримують.")
+
+    async def test_add_marks_unsubscribed(self):
+        self.subscribed = {777, 111, 222}
+        query, _ = await self.press("adm:add")
+        call = query.edit_message_text.call_args
+        self.assertIn("🔕 — ще не підписані", call.args[0])
+        self.assertEqual(self.buttons(call.kwargs["reply_markup"])[0],
+                         ("🔕 Іван @ivan_k · 333", "adm:pick:333"))
+
+    async def test_pick_unsubscribed_asks_to_subscribe(self):
+        self.subscribed = {777, 111, 222}
+        query, context = await self.press("adm:pick:333")
+        context.bot.send_message.assert_awaited_once_with(
+            chat_id=333, text=app.WELCOME_ADMIN + app.WELCOME_ADMIN_SUBSCRIBE)
+        query.answer.assert_awaited_once_with(
+            "✅ Іван @ivan_k · 333 додано. Повідомлення отримуватиме, коли підпишеться")
+
     async def test_add_shows_only_people_who_are_not_admins_yet(self):
         query, _ = await self.press("adm:add")
         call = query.edit_message_text.call_args
@@ -320,6 +351,7 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_add_pages(self):
         self.recent_users = list(range(1001, 1021)) + [111, 222, 777]  # 20 кандидатів, по 8 на сторінку
+        self.subscribed |= set(range(1001, 1021))
         query, _ = await self.press("adm:add")
         call = query.edit_message_text.call_args
         self.assertIn("Сторінка 1 з 3 (усього 20).", call.args[0])

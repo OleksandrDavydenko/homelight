@@ -143,9 +143,10 @@ class InternetWatch:
     """Окрема перевірка інтернету вдома — повідомлення лише адмінам, не підписникам.
 
     Роутер перевіряється на кожній ітерації, незалежно від Shelly. Якщо він
-    мовчить довше за alert_after, кожен отримувач (власник і додаткові адміни з
+    мовчить довше за alert_after, кожен отримувач (власник і адміни з /admins чи
     INTERNET_ALERT_CHAT_IDS) отримує одне попередження, а коли роутер знову
-    відповідає — повідомлення про відновлення.
+    відповідає — повідомлення про відновлення. Отримують лише ті з них, хто
+    підписаний на сповіщення про світло (і власник теж).
     """
 
     def __init__(self, chat_ids: list[int] | None, alert_after: float = ADMIN_ALERT_AFTER):
@@ -160,7 +161,16 @@ class InternetWatch:
         return bool(self.chat_ids) and self._down_since is not None and not self._alerted
 
     async def _notify(self, bot: Bot, text: str) -> None:
+        try:
+            subscribed = await asyncio.to_thread(db.filter_subscribed, self.chat_ids)
+        except Exception:
+            # Не вдалося перевірити підписку — краще повідомити всіх адмінів, ніж нікого
+            logger.exception("Не вдалося перевірити підписку адмінів, надсилаю всім")
+            subscribed = set(self.chat_ids)
         for chat_id in self.chat_ids:
+            if chat_id not in subscribed:
+                logger.info("Адмін %s не підписаний — повідомлення про інтернет не надсилаю", chat_id)
+                continue
             try:
                 await _send(bot, chat_id, text)
             except Exception:

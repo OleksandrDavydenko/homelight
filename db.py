@@ -264,3 +264,18 @@ def get_users(ids) -> dict[int, tuple[str, str | None]]:
         )
         return {int(row[0]): (row[1], row[2]) for row in cursor.fetchall()}
     return _run(query)
+
+
+def filter_subscribed(ids) -> set[int]:
+    """Ті з ids, хто підписаний на сповіщення про світло."""
+    ids = list(ids)
+    if not ids:
+        return set()
+
+    def query(cursor):
+        cursor.execute(
+            "SELECT telegram_id FROM usersLightBot WHERE subscribed = TRUE AND telegram_id = ANY(%s);",
+            (ids,),
+        )
+        return {int(row[0]) for row in cursor.fetchall()}
+    return _run(query)
