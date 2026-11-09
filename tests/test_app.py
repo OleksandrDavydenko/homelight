@@ -7,7 +7,7 @@ from unittest import mock
 from telegram import Chat, Message, MessageEntity, Update, User
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import NetworkError
-from telegram.ext import CallbackQueryHandler, CommandHandler
+from telegram.ext import CallbackQueryHandler, CommandHandler, TypeHandler
 
 import app
 import light_checker
@@ -249,6 +249,7 @@ class TestmodeCommandTest(unittest.IsolatedAsyncioTestCase):
 
 
 NAMES = {111: "Олена", 222: "Петро", 333: "Іван", 777: "Власник"}
+USERNAMES = {333: "ivan_k"}  # @username відомий лише для Івана
 
 
 class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
@@ -262,8 +263,9 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(app.config, "INTERNET_ALERT_CHAT_IDS", [222]),
             mock.patch.object(app.db, "get_setting", side_effect=lambda key: self.stored),
             mock.patch.object(app.db, "set_setting", side_effect=self.store),
-            mock.patch.object(app.db, "get_user_names",
-                              side_effect=lambda ids: {i: NAMES[i] for i in ids if i in NAMES}),
+            mock.patch.object(app.db, "get_users",
+                              side_effect=lambda ids: {i: (NAMES[i], USERNAMES.get(i))
+                                                       for i in ids if i in NAMES}),
             mock.patch.object(app.db, "get_recent_users", side_effect=self.recent),
             mock.patch.object(app.db, "count_users", side_effect=self.count),
         ]
@@ -279,7 +281,7 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
         return [uid for uid in self.recent_users if uid not in exclude]
 
     def recent(self, limit, exclude, offset=0):
-        return [(uid, NAMES.get(uid, f"User{uid}"))
+        return [(uid, NAMES.get(uid, f"User{uid}"), USERNAMES.get(uid))
                 for uid in self.candidates(exclude)[offset:offset + limit]]
 
     def count(self, exclude):
@@ -314,7 +316,7 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(call.args[0].startswith("Кого додати?"))
         self.assertNotIn("Сторінка", call.args[0])  # усі вміщуються на одну сторінку
         self.assertEqual(self.buttons(call.kwargs["reply_markup"]),
-                         [("Іван · 333", "adm:pick:333"), ("↩️ До списку адмінів", "adm:list")])
+                         [("Іван @ivan_k · 333", "adm:pick:333"), ("↩️ До списку адмінів", "adm:list")])
 
     async def test_add_pages(self):
         self.recent_users = list(range(1001, 1021)) + [111, 222, 777]  # 20 кандидатів, по 8 на сторінку
@@ -352,8 +354,8 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.stored, "111,333")
         self.assertEqual(watch.chat_ids, [777, 222, 111, 333])
         context.bot.send_message.assert_awaited_once_with(chat_id=333, text=app.WELCOME_ADMIN)
-        query.answer.assert_awaited_once_with("✅ Іван · 333 тепер отримує повідомлення про інтернет")
-        self.assertIn("• Іван · 333", query.edit_message_text.call_args.args[0])
+        query.answer.assert_awaited_once_with("✅ Іван @ivan_k · 333 тепер отримує повідомлення про інтернет")
+        self.assertIn("• Іван @ivan_k · 333", query.edit_message_text.call_args.args[0])
 
     async def test_delete(self):
         watch = app.broadcaster.InternetWatch([777, 222, 111])
@@ -373,6 +375,50 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
         query.edit_message_text.assert_not_called()
         context.bot.send_message.assert_not_called()
         self.assertEqual(self.stored, "111")
+
+
+class RememberUserTest(unittest.IsolatedAsyncioTestCase):
+    def update(self, user_id=7, first_name="Олена", username="olena", is_bot=False):
+        return SimpleNamespace(effective_user=SimpleNamespace(
+            id=user_id, first_name=first_name, username=username, is_bot=is_bot))
+
+    async def test_writes_only_when_something_changed(self):
+        context = make_context()
+        with mock.patch.object(app.db, "remember_user") as remember:
+            await app.remember_user(self.update(), context)
+            await app.remember_user(self.update(), context)          # те саме — без запису
+            await app.remember_user(self.update(username="olena_new"), context)
+            await app.remember_user(self.update(username=None), context)
+        self.assertEqual(remember.call_args_list, [
+            mock.call(7, "Олена", "olena"),
+            mock.call(7, "Олена", "olena_new"),
+            mock.call(7, "Олена", None),
+        ])
+
+    async def test_bots_and_empty_updates_are_ignored(self):
+        with mock.patch.object(app.db, "remember_user") as remember:
+            await app.remember_user(self.update(is_bot=True), make_context())
+            await app.remember_user(SimpleNamespace(effective_user=None), make_context())
+        remember.assert_not_called()
+
+    async def test_db_error_does_not_break_handling(self):
+        context = make_context()
+        with mock.patch.object(app.db, "remember_user", side_effect=RuntimeError("db down")) as remember:
+            await app.remember_user(self.update(), context)
+            await app.remember_user(self.update(), context)  # не запам'ятали — спробує ще раз
+        self.assertEqual(remember.call_count, 2)
+
+    def test_registered_before_all_other_handlers(self):
+        with mock.patch.object(app.config, "TELEGRAM_TOKEN", "123:abc"):
+            application = app.build_application()
+        [handler] = application.handlers[-1]
+        self.assertIsInstance(handler, TypeHandler)
+        self.assertIs(handler.callback, app.remember_user)
+
+    def test_user_label(self):
+        self.assertEqual(app.user_label(123, "Влад", "vlad"), "Влад @vlad · 123")
+        self.assertEqual(app.user_label(123, "Влад"), "Влад · 123")
+        self.assertEqual(app.user_label(123, "", None), "Без імені · 123")
 
 
 class AdminOnlyTest(unittest.TestCase):

@@ -21,6 +21,7 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
@@ -311,9 +312,32 @@ WELCOME_ADMIN = ("👋 Вас додано: ви отримуватимете п
                  "й повертається інтернет.")
 
 
-def user_label(user_id: int, name: str | None) -> str:
-    """Ім'я та повний Telegram ID, щоб розрізнити однакові імена."""
-    return f"{(name or '').strip() or 'Без імені'} · {user_id}"
+def user_label(user_id: int, name: str | None, username: str | None = None) -> str:
+    """Ім'я, @username (якщо відомий) і повний Telegram ID, щоб точно розрізнити людей."""
+    label = (name or "").strip() or "Без імені"
+    if username:
+        label += f" @{username}"
+    return f"{label} · {user_id}"
+
+
+async def remember_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Запам'ятовує ім'я та @username кожного, хто взаємодіє з ботом (для /admins).
+
+    Працює перед усіма іншими обробниками. У БД пише лише тоді, коли щось
+    змінилося з минулого разу (або вперше після запуску бота).
+    """
+    user = update.effective_user
+    if user is None or user.is_bot:
+        return
+    info = (user.first_name or "", user.username or None)
+    known = context.bot_data.setdefault("known_users", {})
+    if known.get(user.id) == info:
+        return
+    try:
+        await asyncio.to_thread(db.remember_user, user.id, *info)
+        known[user.id] = info
+    except Exception:
+        logger.exception("Не вдалося запам'ятати користувача %s", user.id)
 
 
 async def admins_view() -> tuple[str, InlineKeyboardMarkup]:
@@ -321,12 +345,12 @@ async def admins_view() -> tuple[str, InlineKeyboardMarkup]:
     db_ids = await asyncio.to_thread(admins.load_ids)
     heroku_ids = [i for i in config.INTERNET_ALERT_CHAT_IDS if i not in db_ids]
     others = [i for i in dict.fromkeys(db_ids + heroku_ids) if i != config.ADMIN_CHAT_ID]
-    names = await asyncio.to_thread(db.get_user_names, others) if others else {}
+    users = await asyncio.to_thread(db.get_users, others) if others else {}
 
     lines = ["👥 Хто отримує повідомлення про інтернет:", "• Ви (власник)"]
     buttons = []
     for user_id in others:
-        label = user_label(user_id, names.get(user_id))
+        label = user_label(user_id, *users.get(user_id, ("", None)))
         if user_id in db_ids:
             lines.append(f"• {label}")
             buttons.append([InlineKeyboardButton(f"❌ {label}", callback_data=f"adm:del:{user_id}")])
@@ -355,8 +379,8 @@ async def add_admin_view(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
     else:
         text = "Поки немає кого додати: попросіть людину натиснути /start у боті."
 
-    buttons = [[InlineKeyboardButton(user_label(uid, name), callback_data=f"adm:pick:{uid}")]
-               for uid, name in users]
+    buttons = [[InlineKeyboardButton(user_label(uid, name, username), callback_data=f"adm:pick:{uid}")]
+               for uid, name, username in users]
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅️ Попередні", callback_data=f"adm:add:{page - 1}"))
@@ -397,8 +421,8 @@ async def admins_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.answer()
             return
         ids = await asyncio.to_thread(admins.load_ids)
-        names = await asyncio.to_thread(db.get_user_names, [user_id])
-        label = user_label(user_id, names.get(user_id))
+        users = await asyncio.to_thread(db.get_users, [user_id])
+        label = user_label(user_id, *users.get(user_id, ("", None)))
         if action == "pick":
             if user_id not in ids and user_id != config.ADMIN_CHAT_ID:
                 ids.append(user_id)
@@ -522,6 +546,9 @@ async def post_stop(app: Application) -> None:
 
 
 def register_handlers(app: Application) -> None:
+    # Група -1 виконується перед усіма: запам'ятати ім'я та @username для /admins
+    app.add_handler(TypeHandler(Update, remember_user), group=-1)
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("check", check))
