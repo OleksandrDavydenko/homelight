@@ -8,6 +8,7 @@ from light_checker import Reading, StateTracker
 
 
 NOT_TEST_MODE = mock.Mock(return_value=None)  # тестовий режим вимкнено
+ALL_SUBSCRIBED = mock.Mock(side_effect=lambda ids: set(ids))  # усі адміни підписані
 
 
 class FakeBot:
@@ -158,6 +159,7 @@ class AdminWatchTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.sent, [])
 
 
+@mock.patch.object(broadcaster.db, "filter_subscribed", ALL_SUBSCRIBED)
 class InternetWatchTest(unittest.IsolatedAsyncioTestCase):
     async def feed(self, watch, bot, states, shelly_online=False, start=1000, step=60):
         for i, internet in enumerate(states):
@@ -198,6 +200,21 @@ class InternetWatchTest(unittest.IsolatedAsyncioTestCase):
         await self.feed(watch, bot, [False] * 4)
         self.assertEqual([chat for chat, _ in bot.sent], [888])
 
+    async def test_only_subscribed_admins_get_messages_owner_too(self):
+        bot = FakeBot()
+        watch = broadcaster.InternetWatch([ADMIN, 888, 999])
+        with mock.patch.object(broadcaster.db, "filter_subscribed", return_value={888}) as subscribed:
+            await self.feed(watch, bot, [False] * 4 + [True])
+        self.assertEqual([chat for chat, _ in bot.sent], [888, 888])  # «🔴», потім «🟢»
+        subscribed.assert_called_with([ADMIN, 888, 999])
+
+    async def test_everyone_gets_messages_if_subscription_check_fails(self):
+        bot = FakeBot()
+        watch = broadcaster.InternetWatch([ADMIN, 888])
+        with mock.patch.object(broadcaster.db, "filter_subscribed", side_effect=RuntimeError("db down")):
+            await self.feed(watch, bot, [False] * 4)
+        self.assertEqual([chat for chat, _ in bot.sent], [ADMIN, 888])
+
     async def test_unknown_is_ignored(self):
         bot, watch = FakeBot(), broadcaster.InternetWatch([ADMIN])
         await self.feed(watch, bot, [None] * 6)
@@ -229,6 +246,7 @@ class RouterChecker:
 
 @mock.patch.object(broadcaster, "SEND_DELAY", 0)
 @mock.patch.object(broadcaster.db, "get_setting", NOT_TEST_MODE)
+@mock.patch.object(broadcaster.db, "filter_subscribed", ALL_SUBSCRIBED)
 class RunCheckInternetTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         patches = [

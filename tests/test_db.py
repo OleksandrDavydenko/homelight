@@ -110,6 +110,13 @@ class DbTest(unittest.TestCase):
         self.assertEqual(db.get_users([111, 333, 999]), {111: ("Олена", None), 333: ("Іван", "ivan_k")})
         self.assertEqual(db.get_users([]), {})
 
+    def test_filter_subscribed(self):
+        db.set_subscription(1, "A", True)
+        db.set_subscription(2, "B", False)
+        db.set_subscription(3, "C", True)
+        self.assertEqual(db.filter_subscribed([1, 2, 3, 4]), {1, 3})
+        self.assertEqual(db.filter_subscribed([]), set())
+
     def test_remember_user_keeps_subscription(self):
         db.set_subscription(1, "A", True)
         db.remember_user(1, "Анна", "anna")
