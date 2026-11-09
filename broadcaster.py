@@ -120,7 +120,8 @@ class AdminWatch:
         if reading.known or reading.internet is False:
             if self._alerted:
                 gap = format_duration(now - self._unknown_since)
-                await _send(bot, self.chat_id, f"✅ Дані з Shelly знову надходять (не було {gap}).")
+                await _send(bot, self.chat_id,
+                            f"🟢 Дані від датчика світла знову надходять\nЇх не було {gap}.")
             self._unknown_since, self._alerted = None, False
             return
 
@@ -131,20 +132,24 @@ class AdminWatch:
 
         self._alerted = True
         since = format_moment(self._unknown_since, now)
-        error = (reading.error or "невідома помилка")[:300]
-        await _send(bot, self.chat_id, f"⚠️ Не вдається отримати дані з Shelly з {since}:\n{error}")
+        # Технічні подробиці — лише в лог, у повідомленні їх немає
+        logger.warning("Дані з Shelly Cloud недоступні з %s: %s", since, reading.error)
+        await _send(bot, self.chat_id,
+                    f"🟠 Немає даних від датчика світла\n"
+                    f"З {since} бот не може отримати дані датчика. Подробиці — у логах бота.")
 
 
 class InternetWatch:
-    """Окрема перевірка інтернету вдома — повідомлення лише власнику, не підписникам.
+    """Окрема перевірка інтернету вдома — повідомлення лише адмінам, не підписникам.
 
     Роутер перевіряється на кожній ітерації, незалежно від Shelly. Якщо він
-    мовчить довше за alert_after, власник отримує одне попередження, а коли
-    роутер знову відповідає — повідомлення про відновлення.
+    мовчить довше за alert_after, кожен отримувач (власник і додаткові адміни з
+    INTERNET_ALERT_CHAT_IDS) отримує одне попередження, а коли роутер знову
+    відповідає — повідомлення про відновлення.
     """
 
-    def __init__(self, chat_id: int | None, alert_after: float = ADMIN_ALERT_AFTER):
-        self.chat_id = chat_id
+    def __init__(self, chat_ids: list[int] | None, alert_after: float = ADMIN_ALERT_AFTER):
+        self.chat_ids = list(chat_ids or [])
         self.alert_after = alert_after
         self._down_since: int | None = None
         self._alerted = False
@@ -152,18 +157,25 @@ class InternetWatch:
     @property
     def pending(self) -> bool:
         """Роутер уже мовчить, але попередження ще не надіслано."""
-        return bool(self.chat_id) and self._down_since is not None and not self._alerted
+        return bool(self.chat_ids) and self._down_since is not None and not self._alerted
+
+    async def _notify(self, bot: Bot, text: str) -> None:
+        for chat_id in self.chat_ids:
+            try:
+                await _send(bot, chat_id, text)
+            except Exception:
+                logger.exception("Не вдалося надіслати повідомлення про інтернет %s", chat_id)
 
     async def observe(self, bot: Bot, internet: bool | None, shelly_online: bool | None,
                       now: int) -> None:
         """internet: True/False — чи відповідає роутер; None — перевірка недоступна."""
-        if not self.chat_id or internet is None:
+        if not self.chat_ids or internet is None:
             return
 
         if internet:
             if self._alerted:
                 gap = format_duration(now - self._down_since)
-                await _send(bot, self.chat_id, f"✅ Інтернет удома відновився (не було {gap}).")
+                await self._notify(bot, f"🟢 Інтернет удома відновився\nЙого не було {gap}.")
             self._down_since, self._alerted = None, False
             return
 
@@ -173,12 +185,15 @@ class InternetWatch:
             return
 
         self._alerted = True
-        text = f"⚠️ Вдома немає інтернету з {format_moment(self._down_since, now)} (роутер не відповідає)."
+        text = (f"🔴 Вдома немає інтернету\n"
+                f"З {format_moment(self._down_since, now)} роутер не відповідає. ")
         if shelly_online:
-            text += ("\nАле Shelly на зв'язку, тож вихідний інтернет є — схоже, не проходять "
-                     "вхідні з'єднання на реальну IP. Поки так, бот не відрізнить відключення "
-                     "світла від збою інтернету.")
-        await _send(bot, self.chat_id, text)
+            text += ("Але датчик світла на зв'язку, тож вихідний інтернет працює — схоже, "
+                     "не проходять вхідні з'єднання на реальну IP. Поки так, бот не відрізнить "
+                     "відключення світла від збою інтернету.")
+        else:
+            text += "Поки так, бот не бачить світла й нічого не надсилає підписникам."
+        await self._notify(bot, text)
 
 
 async def _check_internet(checker: LightChecker) -> bool | None:

@@ -83,6 +83,30 @@ def probe_router(host: str, port: int, timeout: float = 5, attempts: int = 2) ->
     return ROUTER_SILENT
 
 
+def measure_router_latency(host: str, port: int, count: int = 5, timeout: float = 3,
+                           pause: float = 0.2) -> tuple[list[float], int]:
+    """Затримка до роутера: (час відповіді кожної спроби в мс, кількість втрачених спроб).
+
+    Відповіддю вважається і встановлене з'єднання, і відмова: в обох випадках
+    роутер відповів, і час до відповіді — це затримка мережі.
+    """
+    latencies, lost = [], 0
+    for i in range(count):
+        if i:
+            time.sleep(pause)
+        started = time.monotonic()
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                pass
+        except ConnectionRefusedError:
+            pass
+        except OSError:
+            lost += 1
+            continue
+        latencies.append((time.monotonic() - started) * 1000)
+    return latencies, lost
+
+
 def _to_float(value) -> float | None:
     try:
         return float(value) if value is not None else None
@@ -496,7 +520,7 @@ def format_status_message(reading: Reading, tracker: StateTracker, now: int) -> 
         if reading.internet is False:
             lines = ["⚠️ У будинку зараз немає інтернету, тому стан світла невідомий."]
         else:
-            lines = ["⚠️ Не вдалося отримати дані від Shelly. Спробуйте пізніше."]
+            lines = ["⚠️ Не вдалося отримати дані від датчика світла. Спробуйте пізніше."]
         if tracker.known and tracker.since is not None:
             state = "світло є" if tracker.has_light else "світла немає"
             lines.append(f"\nОстанній відомий стан: {state} з {format_moment(tracker.since, now)}.")

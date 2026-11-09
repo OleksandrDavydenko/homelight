@@ -198,6 +198,24 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(session.calls, 2)
 
 
+@mock.patch.object(light_checker.time, "sleep")
+@mock.patch.object(light_checker.socket, "create_connection")
+class MeasureLatencyTest(unittest.TestCase):
+    def test_answers_and_losses(self, connect, sleep):
+        # 1-ша — з'єднання, 2-га — відмова (теж відповідь), 3-тя — тайм-аут (втрата)
+        connect.side_effect = [mock.MagicMock(), ConnectionRefusedError(), TimeoutError()]
+        times = iter([0.0, 0.020, 1.0, 1.035, 2.0])
+        with mock.patch.object(light_checker.time, "monotonic", lambda: next(times)):
+            latencies, lost = light_checker.measure_router_latency("1.2.3.4", 80, count=3)
+        self.assertEqual([round(x) for x in latencies], [20, 35])
+        self.assertEqual(lost, 1)
+        self.assertEqual(sleep.call_count, 2)  # пауза між спробами
+
+    def test_all_lost(self, connect, sleep):
+        connect.side_effect = OSError("unreachable")
+        self.assertEqual(light_checker.measure_router_latency("1.2.3.4", 80, count=4), ([], 4))
+
+
 @mock.patch.object(light_checker.socket, "create_connection")
 class ProbeRouterTest(unittest.TestCase):
     def test_connected(self, connect):
@@ -465,9 +483,10 @@ class FormattingTest(unittest.TestCase):
     def test_status_unknown(self):
         r = Reading(has_light=None, fetched_at=NOW, error="boom")
         text = format_status_message(r, StateTracker(False, NOW - 600), NOW)
-        self.assertIn("Не вдалося отримати дані", text)
+        self.assertIn("Не вдалося отримати дані від датчика світла", text)
         self.assertIn("Останній відомий стан: світла немає", text)
         self.assertNotIn("boom", text)
+        self.assertNotIn("Shelly", text)
 
     def test_status_offline_with_internet(self):
         r = Reading(has_light=False, fetched_at=NOW, online=False, internet=True)

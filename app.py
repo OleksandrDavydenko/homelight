@@ -27,6 +27,7 @@ from light_checker import (
     LightChecker,
     StateTracker,
     format_status_message,
+    measure_router_latency,
     probe_router,
 )
 
@@ -165,7 +166,7 @@ ROUTER_USAGE = (
     "Як користуватися:\n"
     "/router — перевірити роутер з налаштувань (ROUTER_HOST, ROUTER_PORT)\n"
     "/router 8443 — перевірити інший порт\n"
-    "/router 195.38.8.114 8443 — перевірити довільну адресу й порт\n\n"
+    "/router адреса порт — перевірити довільну адресу й порт\n\n"
     "Перевірка з адресою чи портом разова: налаштування бота не змінюються."
 )
 
@@ -187,12 +188,18 @@ def parse_router_args(args: list[str], host: str | None, port: int) -> tuple[str
     return host, port
 
 
-def describe_router_result(result: str, target: str) -> str:
-    if result == ROUTER_OPEN:
-        return f"✅ Роутер {target} відповідає: порт відкритий (з'єднання встановлено)."
-    if result == ROUTER_REFUSED:
-        return f"✅ Роутер {target} відповідає відмовою (порт закритий)."
-    return f"❌ Роутер {target} не відповідає."
+def describe_latency(latencies: list[float], lost: int) -> str:
+    """Рядок про якість зв'язку для /router (без оцінок «добре/погано» в мс)."""
+    total = len(latencies) + lost
+    if not latencies:
+        return f"🟠 Зв'язок нестабільний: усі {total} спроб втрачено."
+    avg, low, high = (round(v) for v in (sum(latencies) / len(latencies),
+                                          min(latencies), max(latencies)))
+    if lost == 0:
+        return f"📶 Зв'язок стабільний: затримка {avg} мс (від {low} до {high}), втрат немає."
+    if lost == 1:
+        return f"📶 Зв'язок майже стабільний: затримка {avg} мс, втрачено 1 з {total}."
+    return f"🟠 Зв'язок нестабільний: затримка {avg} мс, втрачено {lost} з {total}."
 
 
 TESTMODE_USAGE = (
@@ -245,39 +252,43 @@ async def router_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await message.reply_text("⚠️ Не вдалося розібрати адресу чи порт.\n\n" + ROUTER_USAGE)
         return
     if not host:
-        await message.reply_text("ℹ️ ROUTER_HOST не задано в налаштуваннях Heroku.\n\n" + ROUTER_USAGE)
+        await message.reply_text("ℹ️ Перевірку роутера не налаштовано: задайте ROUTER_HOST у Heroku."
+                                 "\n\n" + ROUTER_USAGE)
         return
 
-    await message.reply_text("🔄 Перевіряю роутер...")
-    target = f"{host}:{port}"
+    await message.reply_text("🔄 Перевіряю зв'язок з роутером...")
 
     if args:
         # Разова перевірка іншої адреси чи порту: стан перевірки бота не змінюється
         result = await asyncio.to_thread(probe_router, host, port)
-        text = describe_router_result(result, target)
-        if result != ROUTER_SILENT:
-            text += (f"\n\nЩоб бот перевіряв роутер саме так, задайте в Heroku "
-                     f"ROUTER_HOST={host} і ROUTER_PORT={port}.")
-        text += "\n\nЦе разова перевірка: налаштування бота не змінено."
-        await message.reply_text(text)
+        if result == ROUTER_SILENT:
+            text = f"🔴 {host}:{port} не відповідає."
+        else:
+            latency = await asyncio.to_thread(measure_router_latency, host, port)
+            text = (f"🟢 {host}:{port} відповідає.\n{describe_latency(*latency)}\n\n"
+                    f"Щоб бот перевіряв саме так, задайте в Heroku "
+                    f"ROUTER_HOST={host} і ROUTER_PORT={port}.")
+        await message.reply_text(text + "\n\nℹ️ Разова перевірка: налаштування бота не змінено.")
         return
 
+    where = f"{host}, порт {port}"
     result, online = await asyncio.to_thread(checker.check_router)
-    text = describe_router_result(result, target)
-    if result == ROUTER_OPEN:
-        text += "\nЦе найнадійніший режим."
-    elif result == ROUTER_REFUSED and not online:
-        text += ("\nАле раніше цей порт був відкритий, тож бот вважає таку відмову "
-                 "відповіддю обладнання провайдера, а не вашого роутера.")
-
     if online:
-        conclusion = "інтернет у будинку є."
+        latency = await asyncio.to_thread(measure_router_latency, host, port)
+        text = f"🟢 Інтернет удома є\nРоутер на зв'язку ({where}).\n{describe_latency(*latency)}"
+    elif result == ROUTER_REFUSED:
+        # Суворий режим: раніше порт був відкритий, тож ця відповідь — не від роутера
+        text = ("🔴 Інтернету вдома, ймовірно, немає\n"
+                "Відповів не ваш роутер, а, схоже, обладнання провайдера.")
     elif checker.router_trusted:
-        conclusion = "інтернет у будинку немає."
+        text = (f"🔴 Інтернету вдома немає\nРоутер не відповідає ({where}).\n"
+                "Поки так, бот не бачить світла й нічого не надсилає підписникам.")
     else:
-        conclusion = ("роутер жодного разу не відповідав від запуску, тож бот не довіряє "
-                      "його мовчанню й працює так, ніби ROUTER_HOST не задано.")
-    await message.reply_text(f"{text}\n\nВисновок бота: {conclusion}")
+        text = (f"⚪️ Роутер не відповідає ({where})\n"
+                "Він жодного разу не відповідав від запуску бота: схоже, неправильна адреса "
+                "чи порт або провайдер не пропускає вхідні з'єднання. Поки так, бот визначає "
+                "світло лише за датчиком.")
+    await message.reply_text(text)
 
 
 async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -310,7 +321,7 @@ async def post_init(app: Application) -> None:
     checker = LightChecker()
     tracker = StateTracker.from_dict(state)
     admin_watch = broadcaster.AdminWatch(config.ADMIN_CHAT_ID)
-    internet_watch = broadcaster.InternetWatch(config.ADMIN_CHAT_ID)
+    internet_watch = broadcaster.InternetWatch(config.internet_alert_chat_ids())
     app.bot_data["checker"] = checker
     app.bot_data["tracker"] = tracker
     app.bot_data["monitor_task"] = asyncio.create_task(
