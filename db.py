@@ -87,9 +87,12 @@ def init_db() -> None:
                 id SERIAL PRIMARY KEY,
                 telegram_id BIGINT UNIQUE NOT NULL,
                 first_name VARCHAR(100),
-                subscribed BOOLEAN DEFAULT FALSE
+                subscribed BOOLEAN DEFAULT FALSE,
+                username VARCHAR(64)
             );
         """)
+        # Для таблиці, створеної попередньою версією без username
+        cursor.execute("ALTER TABLE usersLightBot ADD COLUMN IF NOT EXISTS username VARCHAR(64);")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS light_state (
                 id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
@@ -122,6 +125,16 @@ def ensure_user(telegram_id: int, first_name: str) -> None:
         VALUES (%s, %s, FALSE)
         ON CONFLICT (telegram_id) DO UPDATE SET first_name = EXCLUDED.first_name;
     """, (telegram_id, first_name[:100])))
+
+
+def remember_user(telegram_id: int, first_name: str, username: str | None) -> None:
+    """Запам'ятовує ім'я та @username (без «@») користувача. Підписку не змінює."""
+    _run(lambda cursor: cursor.execute("""
+        INSERT INTO usersLightBot (telegram_id, first_name, username, subscribed)
+        VALUES (%s, %s, %s, FALSE)
+        ON CONFLICT (telegram_id) DO UPDATE
+            SET first_name = EXCLUDED.first_name, username = EXCLUDED.username;
+    """, (telegram_id, (first_name or "")[:100], (username or None) and username[:64])))
 
 
 def set_subscription(telegram_id: int, first_name: str, subscribed: bool) -> None:
@@ -209,8 +222,8 @@ def set_setting(key: str, value: str) -> None:
     logger.info("Налаштування %s = %s", key, value)
 
 
-def get_recent_users(limit: int = 10, exclude=(), offset: int = 0) -> list[tuple[int, str]]:
-    """Користувачі, які натискали /start: [(telegram_id, first_name)], новіші першими.
+def get_recent_users(limit: int = 10, exclude=(), offset: int = 0) -> list[tuple[int, str, str | None]]:
+    """Користувачі, які натискали /start: [(telegram_id, first_name, username)], новіші першими.
 
     offset — скільки пропустити (для гортання сторінками).
     """
@@ -218,11 +231,11 @@ def get_recent_users(limit: int = 10, exclude=(), offset: int = 0) -> list[tuple
 
     def query(cursor):
         cursor.execute("""
-            SELECT telegram_id, COALESCE(first_name, '') FROM usersLightBot
+            SELECT telegram_id, COALESCE(first_name, ''), username FROM usersLightBot
             WHERE NOT (telegram_id = ANY(%s))
             ORDER BY id DESC LIMIT %s OFFSET %s;
         """, (exclude, limit, offset))
-        return [(int(row[0]), row[1]) for row in cursor.fetchall()]
+        return [(int(row[0]), row[1], row[2]) for row in cursor.fetchall()]
     return _run(query)
 
 
@@ -237,16 +250,17 @@ def count_users(exclude=()) -> int:
     return _run(query)
 
 
-def get_user_names(ids) -> dict[int, str]:
-    """Імена користувачів за telegram_id (кого немає в БД — немає й у словнику)."""
+def get_users(ids) -> dict[int, tuple[str, str | None]]:
+    """{telegram_id: (first_name, username)} (кого немає в БД — немає й у словнику)."""
     ids = list(ids)
     if not ids:
         return {}
 
     def query(cursor):
         cursor.execute(
-            "SELECT telegram_id, COALESCE(first_name, '') FROM usersLightBot WHERE telegram_id = ANY(%s);",
+            "SELECT telegram_id, COALESCE(first_name, ''), username FROM usersLightBot "
+            "WHERE telegram_id = ANY(%s);",
             (ids,),
         )
-        return {int(row[0]): row[1] for row in cursor.fetchall()}
+        return {int(row[0]): (row[1], row[2]) for row in cursor.fetchall()}
     return _run(query)

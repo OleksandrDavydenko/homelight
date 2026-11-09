@@ -99,14 +99,36 @@ class DbTest(unittest.TestCase):
     def test_recent_users_and_names(self):
         for telegram_id, name in ((111, "Олена"), (222, "Петро"), (333, "Іван")):
             db.ensure_user(telegram_id, name)
-        self.assertEqual(db.get_recent_users(), [(333, "Іван"), (222, "Петро"), (111, "Олена")])
-        self.assertEqual(db.get_recent_users(limit=2), [(333, "Іван"), (222, "Петро")])
-        self.assertEqual(db.get_recent_users(exclude=[333, 111]), [(222, "Петро")])
-        self.assertEqual(db.get_recent_users(limit=2, offset=2), [(111, "Олена")])
+        db.remember_user(333, "Іван", "ivan_k")
+        self.assertEqual(db.get_recent_users(),
+                         [(333, "Іван", "ivan_k"), (222, "Петро", None), (111, "Олена", None)])
+        self.assertEqual(db.get_recent_users(limit=2), [(333, "Іван", "ivan_k"), (222, "Петро", None)])
+        self.assertEqual(db.get_recent_users(exclude=[333, 111]), [(222, "Петро", None)])
+        self.assertEqual(db.get_recent_users(limit=2, offset=2), [(111, "Олена", None)])
         self.assertEqual(db.count_users(), 3)
         self.assertEqual(db.count_users(exclude=[111]), 2)
-        self.assertEqual(db.get_user_names([111, 333, 999]), {111: "Олена", 333: "Іван"})
-        self.assertEqual(db.get_user_names([]), {})
+        self.assertEqual(db.get_users([111, 333, 999]), {111: ("Олена", None), 333: ("Іван", "ivan_k")})
+        self.assertEqual(db.get_users([]), {})
+
+    def test_remember_user_keeps_subscription(self):
+        db.set_subscription(1, "A", True)
+        db.remember_user(1, "Анна", "anna")
+        self.assertTrue(db.get_user_subscription(1))
+        self.assertEqual(db.get_users([1]), {1: ("Анна", "anna")})
+        db.remember_user(2, "Борис", None)  # новий користувач — без підписки
+        self.assertFalse(db.get_user_subscription(2))
+        self.assertEqual(db.get_users([2]), {2: ("Борис", None)})
+
+    def test_migrates_users_table_without_username(self):
+        with contextlib.closing(self._connect()) as conn, conn, conn.cursor() as cur:
+            cur.execute("DROP TABLE usersLightBot;")
+            cur.execute("""CREATE TABLE usersLightBot (
+                id SERIAL PRIMARY KEY, telegram_id BIGINT UNIQUE NOT NULL,
+                first_name VARCHAR(100), subscribed BOOLEAN DEFAULT FALSE);""")
+            cur.execute("INSERT INTO usersLightBot (telegram_id, first_name, subscribed) VALUES (5, 'Олег', TRUE);")
+        db.init_db()
+        self.assertEqual(db.get_users([5]), {5: ("Олег", None)})
+        self.assertTrue(db.get_user_subscription(5))
 
     def test_settings_roundtrip(self):
         self.assertIsNone(db.get_setting("test_mode"))
