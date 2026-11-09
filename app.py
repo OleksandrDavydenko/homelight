@@ -310,10 +310,12 @@ async def post_init(app: Application) -> None:
     checker = LightChecker()
     tracker = StateTracker.from_dict(state)
     admin_watch = broadcaster.AdminWatch(config.ADMIN_CHAT_ID)
+    internet_watch = broadcaster.InternetWatch(config.ADMIN_CHAT_ID)
     app.bot_data["checker"] = checker
     app.bot_data["tracker"] = tracker
     app.bot_data["monitor_task"] = asyncio.create_task(
-        broadcaster.monitor_loop(app.bot, checker, tracker, admin_watch), name="light-monitor"
+        broadcaster.monitor_loop(app.bot, checker, tracker, admin_watch, internet_watch),
+        name="light-monitor",
     )
 
     if not config.ADMIN_CHAT_ID:

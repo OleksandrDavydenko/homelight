@@ -64,6 +64,7 @@ class Reading:
         return self.has_light is not None
 
 
+ROUTER_CACHE_SECONDS = 30   # с; скільки вважати свіжим результат перевірки роутера
 ROUTER_OPEN = "open"        # з'єднання встановлено — роутер точно на зв'язку
 ROUTER_REFUSED = "refused"  # відмова (закритий порт) — найімовірніше, відповів роутер
 ROUTER_SILENT = "silent"    # відповіді немає — інтернету в будинку немає
@@ -134,6 +135,7 @@ class LightChecker:
         self._router_open_seen = False
         self._router_seen = False
         self._untrusted_logged = False
+        self._router_last: tuple[str, bool, float] | None = None
         self._session = session or requests.Session()
         self._lock = threading.Lock()
         self._last: Reading | None = None
@@ -241,19 +243,27 @@ class LightChecker:
                 self._last = reading
             return reading
 
-    def check_router(self) -> tuple[str, bool]:
+    def check_router(self, max_age: float = 0) -> tuple[str, bool]:
         """Перевіряє роутер. Повертає (результат probe_router, чи є інтернет у будинку).
+
+        max_age > 0 дозволяє повернути результат попередньої перевірки, якщо він
+        не старший за max_age секунд (щоб за одну ітерацію не перевіряти двічі).
 
         Відмову (RST) може надіслати й обладнання провайдера, коли до роутера
         зв'язку вже немає. Тому щойно бот хоч раз побачив відкритий порт,
         інтернет вважається наявним лише за встановленого з'єднання.
         """
+        cached = self._router_last
+        if max_age > 0 and cached is not None and time.time() - cached[2] <= max_age:
+            return cached[0], cached[1]
+
         result = probe_router(self.router_host, self.router_port)
         if result == ROUTER_OPEN:
             self._router_open_seen = True
         online = result == ROUTER_OPEN or (result == ROUTER_REFUSED and not self._router_open_seen)
         if online:
             self._router_seen = True
+        self._router_last = (result, online, time.time())
         return result, online
 
     @property
@@ -269,7 +279,7 @@ class LightChecker:
 
     def _check_router(self, reading: Reading) -> Reading:
         """Shelly офлайн: розрізнити відключення світла й зникнення інтернету в будинку."""
-        result, online = self.check_router()
+        result, online = self.check_router(max_age=ROUTER_CACHE_SECONDS)
         if online:
             logger.info("Shelly офлайн, а роутер відповідає (%s) — світла немає", result)
             return replace(reading, internet=True)

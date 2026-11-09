@@ -133,47 +133,129 @@ class AdminWatchTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_short_gap_is_not_reported(self):
         bot, watch = FakeBot(), broadcaster.AdminWatch(ADMIN)
-        await self.feed(watch, bot, [NO_INTERNET, NO_INTERNET, LIGHT])  # 180 с без даних — ще не час
+        await self.feed(watch, bot, [SHELLY_ERROR, SHELLY_ERROR, LIGHT])  # 180 с без даних — ще не час
         self.assertEqual(bot.sent, [])
 
-    async def test_long_internet_outage_is_reported_once_and_recovery_too(self):
+    async def test_long_shelly_outage_is_reported_once_and_recovery_too(self):
         bot, watch = FakeBot(), broadcaster.AdminWatch(ADMIN)
-        await self.feed(watch, bot, [NO_INTERNET] * 6 + [LIGHT])
+        await self.feed(watch, bot, [SHELLY_ERROR] * 6 + [LIGHT])
         self.assertEqual([chat for chat, _ in bot.sent], [ADMIN, ADMIN])
-        self.assertIn("У будинку немає інтернету", bot.sent[0][1])
-        self.assertIn("підписникам нічого не надсилається", bot.sent[0][1])
-        self.assertEqual(bot.sent[1][1], "✅ Зв'язок відновився (не було 9 хв 0 сек).")
-
-    async def test_shelly_error_is_reported_with_reason(self):
-        bot, watch = FakeBot(), broadcaster.AdminWatch(ADMIN)
-        await self.feed(watch, bot, [SHELLY_ERROR] * 4)
-        self.assertEqual(len(bot.sent), 1)
         self.assertIn("Не вдається отримати дані з Shelly", bot.sent[0][1])
         self.assertIn("wrong_auth_key", bot.sent[0][1])
+        self.assertEqual(bot.sent[1][1], "✅ Дані з Shelly знову надходять (не було 9 хв 0 сек).")
+
+    async def test_internet_outage_is_left_to_internet_watch(self):
+        bot, watch = FakeBot(), broadcaster.AdminWatch(ADMIN)
+        await self.feed(watch, bot, [NO_INTERNET] * 6)
+        self.assertEqual(bot.sent, [])
 
     async def test_disabled_without_admin_chat_id(self):
         bot, watch = FakeBot(), broadcaster.AdminWatch(None)
-        await self.feed(watch, bot, [NO_INTERNET] * 6 + [LIGHT])
+        await self.feed(watch, bot, [SHELLY_ERROR] * 6 + [LIGHT])
         self.assertEqual(bot.sent, [])
+
+
+class InternetWatchTest(unittest.IsolatedAsyncioTestCase):
+    async def feed(self, watch, bot, states, shelly_online=False, start=1000, step=60):
+        for i, internet in enumerate(states):
+            await watch.observe(bot, internet, shelly_online, start + i * step)
+
+    async def test_short_outage_is_not_reported(self):
+        bot, watch = FakeBot(), broadcaster.InternetWatch(ADMIN)
+        await self.feed(watch, bot, [False, False, False, True])  # 120 с — ще не час
+        self.assertEqual(bot.sent, [])
+        self.assertFalse(watch.pending)
+
+    async def test_long_outage_is_reported_once_and_recovery_too(self):
+        bot, watch = FakeBot(), broadcaster.InternetWatch(ADMIN)
+        await self.feed(watch, bot, [False] * 3)
+        self.assertTrue(watch.pending)
+        await self.feed(watch, bot, [False] * 3 + [True], start=1180)
+        self.assertEqual([chat for chat, _ in bot.sent], [ADMIN, ADMIN])
+        self.assertIn("⚠️ Вдома немає інтернету", bot.sent[0][1])
+        self.assertNotIn("Shelly на зв'язку", bot.sent[0][1])
+        self.assertEqual(bot.sent[1][1], "✅ Інтернет удома відновився (не було 6 хв 0 сек).")
+
+    async def test_note_when_shelly_is_online(self):
+        bot, watch = FakeBot(), broadcaster.InternetWatch(ADMIN)
+        await self.feed(watch, bot, [False] * 5, shelly_online=True)
+        self.assertEqual(len(bot.sent), 1)
+        self.assertIn("Shelly на зв'язку", bot.sent[0][1])
+
+    async def test_unknown_is_ignored(self):
+        bot, watch = FakeBot(), broadcaster.InternetWatch(ADMIN)
+        await self.feed(watch, bot, [None] * 6)
+        self.assertEqual(bot.sent, [])
+        self.assertFalse(watch.pending)
+
+    async def test_disabled_without_admin_chat_id(self):
+        bot, watch = FakeBot(), broadcaster.InternetWatch(None)
+        await self.feed(watch, bot, [False] * 6 + [True])
+        self.assertEqual(bot.sent, [])
+        self.assertFalse(watch.pending)
+
+
+class RouterChecker:
+    """Shelly-читання й перевірка роутера із заданими результатами."""
+
+    def __init__(self, reading, router_online, trusted=True):
+        self.reading, self.router_online, self.router_trusted = reading, router_online, trusted
+        self.router_host = "home.example"
+        self.router_calls = 0
+
+    def check_router(self, max_age=0):
+        self.router_calls += 1
+        return ("refused" if self.router_online else "silent"), self.router_online
+
+    def get_reading(self):
+        return self.reading
 
 
 @mock.patch.object(broadcaster, "SEND_DELAY", 0)
 @mock.patch.object(broadcaster.db, "get_setting", NOT_TEST_MODE)
-class RunCheckAdminTest(unittest.IsolatedAsyncioTestCase):
-    async def test_subscribers_never_get_internet_alerts(self):
-        class Checker:
-            def get_reading(self):
-                return NO_INTERNET
+class RunCheckInternetTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        patches = [
+            mock.patch.object(broadcaster.db, "get_all_subscribed_users", return_value=[1, 2]),
+            mock.patch.object(broadcaster.db, "save_light_state"),
+        ]
+        self.users, self.save = [p.start() for p in patches]
+        for p in patches:
+            self.addCleanup(p.stop)
 
-        bot, tracker = FakeBot(), StateTracker(True, 0)
-        watch = broadcaster.AdminWatch(ADMIN, alert_after=0)
-        with mock.patch.object(broadcaster.db, "get_all_subscribed_users", return_value=[1, 2]), \
-                mock.patch.object(broadcaster.db, "save_light_state") as save:
-            for _ in range(5):
-                await broadcaster.run_check(bot, Checker(), tracker, watch)
+    async def run_checks(self, checker, times, alert_after=0, tracker=None):
+        bot, tracker = FakeBot(), tracker or StateTracker(True, 0)
+        admin = broadcaster.AdminWatch(ADMIN, alert_after=alert_after)
+        internet = broadcaster.InternetWatch(ADMIN, alert_after=alert_after)
+        delays = [await broadcaster.run_check(bot, checker, tracker, admin, internet)
+                  for _ in range(times)]
+        return bot, tracker, delays
+
+    async def test_no_internet_only_admin_gets_one_message(self):
+        bot, tracker, _ = await self.run_checks(RouterChecker(NO_INTERNET, False), 5)
         self.assertEqual([chat for chat, _ in bot.sent], [ADMIN])  # лише адміну, один раз
-        save.assert_not_called()
+        self.assertIn("Вдома немає інтернету", bot.sent[0][1])
+        self.save.assert_not_called()
         self.assertTrue(tracker.has_light)  # стан світла не змінився
+
+    async def test_router_is_checked_every_time_even_when_shelly_online(self):
+        checker = RouterChecker(LIGHT, True)
+        bot, _, _ = await self.run_checks(checker, 3)
+        self.assertEqual(checker.router_calls, 3)
+        self.assertEqual(bot.sent, [])
+
+    async def test_router_silent_while_shelly_online_is_reported_with_note(self):
+        bot, _, _ = await self.run_checks(RouterChecker(LIGHT, False), 2)
+        self.assertEqual(len(bot.sent), 1)
+        self.assertIn("Shelly на зв'язку", bot.sent[0][1])
+
+    async def test_router_that_never_answered_is_not_reported(self):
+        bot, _, _ = await self.run_checks(RouterChecker(LIGHT, False, trusted=False), 3)
+        self.assertEqual(bot.sent, [])
+
+    async def test_faster_checks_while_internet_outage_is_pending(self):
+        _, _, delays = await self.run_checks(RouterChecker(NO_INTERNET, False), 1, alert_after=180)
+        self.assertEqual(delays, [broadcaster.CONFIRM_INTERVAL])
 
 
 @mock.patch.object(broadcaster, "SEND_DELAY", 0)

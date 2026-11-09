@@ -100,9 +100,9 @@ async def notify_subscribers(bot: Bot, message: str) -> int:
 class AdminWatch:
     """Службові сповіщення лише власнику бота (ADMIN_CHAT_ID), не підписникам.
 
-    Якщо стан світла невідомий довше за alert_after (немає інтернету в будинку
-    або Shelly Cloud не відповідає), надсилає одне попередження, а коли дані
-    знову з'являються — повідомлення про відновлення.
+    Якщо дані з Shelly Cloud недоступні довше за alert_after, надсилає одне
+    попередження, а коли дані знову з'являються — повідомлення про відновлення.
+    Зникнення інтернету вдома відстежує окремо InternetWatch.
     """
 
     def __init__(self, chat_id: int | None, alert_after: float = ADMIN_ALERT_AFTER):
@@ -115,10 +115,12 @@ class AdminWatch:
         if not self.chat_id:
             return
 
-        if reading.known:
+        # internet=False — дані з Shelly Cloud отримано, просто вдома немає інтернету
+        # (про це повідомляє InternetWatch), тож для цієї перевірки все гаразд
+        if reading.known or reading.internet is False:
             if self._alerted:
                 gap = format_duration(now - self._unknown_since)
-                await _send(bot, self.chat_id, f"✅ Зв'язок відновився (не було {gap}).")
+                await _send(bot, self.chat_id, f"✅ Дані з Shelly знову надходять (не було {gap}).")
             self._unknown_since, self._alerted = None, False
             return
 
@@ -129,21 +131,79 @@ class AdminWatch:
 
         self._alerted = True
         since = format_moment(self._unknown_since, now)
-        if reading.internet is False:
-            text = (f"⚠️ У будинку немає інтернету з {since} (роутер не відповідає).\n"
-                    "Стан світла невідомий, підписникам нічого не надсилається.")
-        else:
-            error = (reading.error or "невідома помилка")[:300]
-            text = f"⚠️ Не вдається отримати дані з Shelly з {since}:\n{error}"
+        error = (reading.error or "невідома помилка")[:300]
+        await _send(bot, self.chat_id, f"⚠️ Не вдається отримати дані з Shelly з {since}:\n{error}")
+
+
+class InternetWatch:
+    """Окрема перевірка інтернету вдома — повідомлення лише власнику, не підписникам.
+
+    Роутер перевіряється на кожній ітерації, незалежно від Shelly. Якщо він
+    мовчить довше за alert_after, власник отримує одне попередження, а коли
+    роутер знову відповідає — повідомлення про відновлення.
+    """
+
+    def __init__(self, chat_id: int | None, alert_after: float = ADMIN_ALERT_AFTER):
+        self.chat_id = chat_id
+        self.alert_after = alert_after
+        self._down_since: int | None = None
+        self._alerted = False
+
+    @property
+    def pending(self) -> bool:
+        """Роутер уже мовчить, але попередження ще не надіслано."""
+        return bool(self.chat_id) and self._down_since is not None and not self._alerted
+
+    async def observe(self, bot: Bot, internet: bool | None, shelly_online: bool | None,
+                      now: int) -> None:
+        """internet: True/False — чи відповідає роутер; None — перевірка недоступна."""
+        if not self.chat_id or internet is None:
+            return
+
+        if internet:
+            if self._alerted:
+                gap = format_duration(now - self._down_since)
+                await _send(bot, self.chat_id, f"✅ Інтернет удома відновився (не було {gap}).")
+            self._down_since, self._alerted = None, False
+            return
+
+        if self._down_since is None:
+            self._down_since = now
+        if self._alerted or now - self._down_since < self.alert_after:
+            return
+
+        self._alerted = True
+        text = f"⚠️ Вдома немає інтернету з {format_moment(self._down_since, now)} (роутер не відповідає)."
+        if shelly_online:
+            text += ("\nАле Shelly на зв'язку, тож вихідний інтернет є — схоже, не проходять "
+                     "вхідні з'єднання на реальну IP. Поки так, бот не відрізнить відключення "
+                     "світла від збою інтернету.")
         await _send(bot, self.chat_id, text)
 
 
+async def _check_internet(checker: LightChecker) -> bool | None:
+    """Чи є інтернет удома (за роутером); None — перевірка не налаштована чи недоступна."""
+    if not getattr(checker, "router_host", None):
+        return None
+    try:
+        # Свіжа перевірка; get_reading потім використає цей самий результат
+        _, online = await asyncio.to_thread(checker.check_router)
+    except Exception:
+        logger.exception("Не вдалося перевірити роутер")
+        return None
+    # Мовчанню роутера, який жодного разу не відповідав, не довіряємо
+    return online if online or checker.router_trusted else None
+
+
 async def run_check(bot: Bot, checker: LightChecker, tracker: StateTracker,
-                    admin_watch: AdminWatch | None = None) -> float:
-    """Одна перевірка: читання → підтвердження зміни → збереження → розсилка.
+                    admin_watch: AdminWatch | None = None,
+                    internet_watch: InternetWatch | None = None) -> float:
+    """Одна перевірка: інтернет удома → читання Shelly → підтвердження зміни →
+    збереження → розсилка.
 
     Повертає, через скільки секунд робити наступну перевірку.
     """
+    internet = await _check_internet(checker) if internet_watch is not None else None
     reading = await asyncio.to_thread(checker.get_reading)
     now = int(time.time())
 
@@ -152,6 +212,12 @@ async def run_check(bot: Bot, checker: LightChecker, tracker: StateTracker,
             await admin_watch.observe(bot, reading, now)
         except Exception:
             logger.exception("Не вдалося надіслати службове сповіщення")
+
+    if internet_watch is not None:
+        try:
+            await internet_watch.observe(bot, internet, reading.online, now)
+        except Exception:
+            logger.exception("Не вдалося надіслати сповіщення про інтернет")
 
     change = tracker.observe(reading, now)
 
@@ -168,16 +234,18 @@ async def run_check(bot: Bot, checker: LightChecker, tracker: StateTracker,
             logger.info("Зміна стану: %s", change)
             await notify_subscribers(bot, format_alert(change))
 
-    return CONFIRM_INTERVAL if tracker.pending else POLL_INTERVAL
+    pending = tracker.pending or (internet_watch is not None and internet_watch.pending)
+    return CONFIRM_INTERVAL if pending else POLL_INTERVAL
 
 
 async def monitor_loop(bot: Bot, checker: LightChecker, tracker: StateTracker,
-                       admin_watch: AdminWatch | None = None) -> None:
+                       admin_watch: AdminWatch | None = None,
+                       internet_watch: InternetWatch | None = None) -> None:
     logger.info("Фонова перевірка світла запущена")
     while True:
         delay = POLL_INTERVAL
         try:
-            delay = await run_check(bot, checker, tracker, admin_watch)
+            delay = await run_check(bot, checker, tracker, admin_watch, internet_watch)
         except asyncio.CancelledError:
             raise
         except Exception:

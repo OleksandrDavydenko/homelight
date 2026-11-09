@@ -231,6 +231,17 @@ class RouterCheckTest(unittest.TestCase):
             self.assertIs(r.has_light, False)
             self.assertIs(r.internet, True)
 
+    def test_router_result_is_reused_within_max_age(self):
+        checker = self.offline_checker()
+        with mock.patch.object(light_checker, "probe_router",
+                               return_value=light_checker.ROUTER_REFUSED) as probe:
+            checker.check_router()          # незалежна перевірка інтернету в run_check
+            r = checker.get_reading()       # Shelly офлайн — бере той самий результат
+            self.assertEqual(probe.call_count, 1)
+            checker.check_router()          # max_age=0 — завжди нова перевірка
+            self.assertEqual(probe.call_count, 2)
+        self.assertIs(r.internet, True)
+
     def test_refused_is_not_trusted_once_open_port_was_seen(self):
         checker = self.offline_checker()
         with mock.patch.object(light_checker, "probe_router",
@@ -244,6 +255,7 @@ class RouterCheckTest(unittest.TestCase):
         with mock.patch.object(light_checker, "probe_router",
                                side_effect=[light_checker.ROUTER_REFUSED, light_checker.ROUTER_SILENT]):
             checker.check_router()  # під час старту роутер відповів
+            checker.check_router()  # свіжа перевірка в run_check: роутер мовчить
             r = checker.get_reading(max_age=30)
         self.assertIsNone(r.has_light)
         self.assertIs(r.internet, False)
