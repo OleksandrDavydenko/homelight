@@ -265,6 +265,7 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(app.db, "get_user_names",
                               side_effect=lambda ids: {i: NAMES[i] for i in ids if i in NAMES}),
             mock.patch.object(app.db, "get_recent_users", side_effect=self.recent),
+            mock.patch.object(app.db, "count_users", side_effect=self.count),
         ]
         for p in patches:
             p.start()
@@ -274,8 +275,15 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(key, app.admins.SETTING_KEY)
         self.stored = value
 
-    def recent(self, limit, exclude):
-        return [(uid, NAMES[uid]) for uid in self.recent_users if uid not in exclude][:limit]
+    def candidates(self, exclude):
+        return [uid for uid in self.recent_users if uid not in exclude]
+
+    def recent(self, limit, exclude, offset=0):
+        return [(uid, NAMES.get(uid, f"User{uid}"))
+                for uid in self.candidates(exclude)[offset:offset + limit]]
+
+    def count(self, exclude):
+        return len(self.candidates(exclude))
 
     async def press(self, data, user_id=777, watch=None):
         query = SimpleNamespace(data=data, from_user=SimpleNamespace(id=user_id),
@@ -295,17 +303,43 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
         call = update.effective_message.reply_text.call_args
         self.assertEqual(call.args[0], "👥 Хто отримує повідомлення про інтернет:\n"
                                        "• Ви (власник)\n"
-                                       "• Олена (…111)\n"
-                                       "• Петро (…222) — задано в Heroku")
+                                       "• Олена · 111\n"
+                                       "• Петро · 222 (задано в Heroku)")
         self.assertEqual(self.buttons(call.kwargs["reply_markup"]),
-                         [("❌ Олена (…111)", "adm:del:111"), ("➕ Додати", "adm:add")])
+                         [("❌ Олена · 111", "adm:del:111"), ("➕ Додати", "adm:add")])
 
     async def test_add_shows_only_people_who_are_not_admins_yet(self):
         query, _ = await self.press("adm:add")
         call = query.edit_message_text.call_args
         self.assertTrue(call.args[0].startswith("Кого додати?"))
+        self.assertNotIn("Сторінка", call.args[0])  # усі вміщуються на одну сторінку
         self.assertEqual(self.buttons(call.kwargs["reply_markup"]),
-                         [("Іван (…333)", "adm:pick:333"), ("⬅️ Назад", "adm:list")])
+                         [("Іван · 333", "adm:pick:333"), ("↩️ До списку адмінів", "adm:list")])
+
+    async def test_add_pages(self):
+        self.recent_users = list(range(1001, 1021)) + [111, 222, 777]  # 20 кандидатів, по 8 на сторінку
+        query, _ = await self.press("adm:add")
+        call = query.edit_message_text.call_args
+        self.assertIn("Сторінка 1 з 3 (усього 20).", call.args[0])
+        buttons = self.buttons(call.kwargs["reply_markup"])
+        self.assertEqual(buttons[0], ("User1001 · 1001", "adm:pick:1001"))
+        self.assertEqual(buttons[8:], [("Далі ➡️", "adm:add:1"), ("↩️ До списку адмінів", "adm:list")])
+
+        query, _ = await self.press("adm:add:1")
+        call = query.edit_message_text.call_args
+        self.assertIn("Сторінка 2 з 3", call.args[0])
+        buttons = self.buttons(call.kwargs["reply_markup"])
+        self.assertEqual(buttons[0], ("User1009 · 1009", "adm:pick:1009"))
+        self.assertEqual(buttons[8:], [("⬅️ Попередні", "adm:add:0"), ("Далі ➡️", "adm:add:2"),
+                                       ("↩️ До списку адмінів", "adm:list")])
+
+        query, _ = await self.press("adm:add:2")
+        buttons = self.buttons(query.edit_message_text.call_args.kwargs["reply_markup"])
+        self.assertEqual(len(buttons), 4 + 2)  # 4 останні + «Попередні» + «До списку»
+        self.assertEqual(buttons[-2:], [("⬅️ Попередні", "adm:add:1"), ("↩️ До списку адмінів", "adm:list")])
+
+        query, _ = await self.press("adm:add:99")  # за межами — остання сторінка
+        self.assertIn("Сторінка 3 з 3", query.edit_message_text.call_args.args[0])
 
     async def test_nobody_to_add(self):
         self.recent_users = [111, 222, 777]
@@ -318,15 +352,15 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.stored, "111,333")
         self.assertEqual(watch.chat_ids, [777, 222, 111, 333])
         context.bot.send_message.assert_awaited_once_with(chat_id=333, text=app.WELCOME_ADMIN)
-        query.answer.assert_awaited_once_with("✅ Іван (…333) тепер отримує повідомлення про інтернет")
-        self.assertIn("• Іван (…333)", query.edit_message_text.call_args.args[0])
+        query.answer.assert_awaited_once_with("✅ Іван · 333 тепер отримує повідомлення про інтернет")
+        self.assertIn("• Іван · 333", query.edit_message_text.call_args.args[0])
 
     async def test_delete(self):
         watch = app.broadcaster.InternetWatch([777, 222, 111])
         query, _ = await self.press("adm:del:111", watch=watch)
         self.assertEqual(self.stored, "")
         self.assertEqual(watch.chat_ids, [777, 222])
-        query.answer.assert_awaited_once_with("Видалено: Олена (…111)")
+        query.answer.assert_awaited_once_with("Видалено: Олена · 111")
         self.assertNotIn("Олена", query.edit_message_text.call_args.args[0])
 
     async def test_back_to_list(self):
