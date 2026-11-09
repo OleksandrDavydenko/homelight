@@ -117,46 +117,57 @@ def reply_texts(update):
     return [c.args[0] for c in update.effective_message.reply_text.call_args_list]
 
 
+GOOD_LATENCY = ([30.0, 28.4, 41.2, 31.0, 29.9], 0)
+
+
+@mock.patch.object(app, "measure_router_latency", mock.Mock(return_value=GOOD_LATENCY))
 class RouterCommandTest(unittest.IsolatedAsyncioTestCase):
     async def run_router(self, checker, args=None):
         update = make_update()
         await app.router_command(update, make_context(args=args, checker=checker))
-        return reply_texts(update)
+        texts = reply_texts(update)
+        for text in texts:  # жодних технічних слів і назв пристроїв
+            for word in ("відмов", "порт закритий", "порт відкритий", "Shelly"):
+                self.assertNotIn(word, text)
+        return texts
 
     async def test_not_configured(self):
         checker = router_checker(host=None)
         texts = await self.run_router(checker)
         self.assertEqual(len(texts), 1)
-        self.assertIn("ROUTER_HOST не задано", texts[0])
+        self.assertIn("Перевірку роутера не налаштовано", texts[0])
         checker.check_router.assert_not_called()
 
-    async def test_open_port(self):
-        texts = await self.run_router(router_checker(light_checker.ROUTER_OPEN))
-        self.assertEqual(texts[0], "🔄 Перевіряю роутер...")
-        self.assertIn("✅ Роутер 195.0.2.10:80 відповідає: порт відкритий", texts[1])
-        self.assertTrue(texts[1].endswith("Висновок бота: інтернет у будинку є."))
-
-    async def test_refused(self):
-        texts = await self.run_router(router_checker(light_checker.ROUTER_REFUSED))
-        self.assertIn("відповідає відмовою", texts[1])
-        self.assertNotIn("обладнання провайдера", texts[1])
-        self.assertTrue(texts[1].endswith("інтернет у будинку є."))
+    async def test_router_online(self):
+        for result in (light_checker.ROUTER_OPEN, light_checker.ROUTER_REFUSED):
+            texts = await self.run_router(router_checker(result))
+            self.assertEqual(texts[0], "🔄 Перевіряю зв'язок з роутером...")
+            self.assertEqual(texts[1], "🟢 Інтернет удома є\n"
+                                       "Роутер на зв'язку (195.0.2.10, порт 80).\n"
+                                       "📶 Зв'язок стабільний: затримка 32 мс (від 28 до 41), втрат немає.")
 
     async def test_refused_in_strict_mode(self):
         texts = await self.run_router(router_checker(light_checker.ROUTER_REFUSED, online=False))
+        self.assertTrue(texts[1].startswith("🔴 Інтернету вдома, ймовірно, немає"))
         self.assertIn("обладнання провайдера", texts[1])
-        self.assertTrue(texts[1].endswith("інтернет у будинку немає."))
 
     async def test_silent(self):
         texts = await self.run_router(router_checker(light_checker.ROUTER_SILENT, online=False))
-        self.assertIn("❌ Роутер 195.0.2.10:80 не відповідає.", texts[1])
-        self.assertTrue(texts[1].endswith("інтернет у будинку немає."))
+        self.assertEqual(texts[1], "🔴 Інтернету вдома немає\n"
+                                   "Роутер не відповідає (195.0.2.10, порт 80).\n"
+                                   "Поки так, бот не бачить світла й нічого не надсилає підписникам.")
 
-    async def test_silent_router_that_never_answered_is_not_trusted(self):
+    async def test_silent_router_that_never_answered(self):
         checker = router_checker(light_checker.ROUTER_SILENT, online=False, trusted=False)
         texts = await self.run_router(checker)
-        self.assertIn("не довіряє його мовчанню", texts[1])
-        self.assertNotIn("інтернет у будинку немає", texts[1])
+        self.assertTrue(texts[1].startswith("⚪️ Роутер не відповідає (195.0.2.10, порт 80)"))
+        self.assertIn("жодного разу не відповідав", texts[1])
+        self.assertIn("лише за датчиком", texts[1])
+
+    async def test_latency_not_measured_when_router_silent(self):
+        with mock.patch.object(app, "measure_router_latency") as measure:
+            await self.run_router(router_checker(light_checker.ROUTER_SILENT, online=False))
+        measure.assert_not_called()
 
     async def test_one_off_port(self):
         checker = router_checker()
@@ -164,15 +175,15 @@ class RouterCommandTest(unittest.IsolatedAsyncioTestCase):
             texts = await self.run_router(checker, args=["8443"])
         probe.assert_called_once_with("195.0.2.10", 8443)
         checker.check_router.assert_not_called()  # стан перевірки бота не чіпаємо
-        self.assertIn("✅ Роутер 195.0.2.10:8443 відповідає відмовою", texts[1])
+        self.assertTrue(texts[1].startswith("🟢 195.0.2.10:8443 відповідає.\n📶 Зв'язок стабільний"))
         self.assertIn("ROUTER_HOST=195.0.2.10 і ROUTER_PORT=8443", texts[1])
-        self.assertIn("разова перевірка", texts[1])
+        self.assertTrue(texts[1].endswith("ℹ️ Разова перевірка: налаштування бота не змінено."))
 
     async def test_one_off_host_and_port_without_router_host(self):
         with mock.patch.object(app, "probe_router", return_value=light_checker.ROUTER_SILENT) as probe:
             texts = await self.run_router(router_checker(host=None), args=["198.51.100.7", "22"])
         probe.assert_called_once_with("198.51.100.7", 22)
-        self.assertIn("❌ Роутер 198.51.100.7:22 не відповідає.", texts[1])
+        self.assertTrue(texts[1].startswith("🔴 198.51.100.7:22 не відповідає."))
         self.assertNotIn("ROUTER_PORT=", texts[1])
 
     async def test_bad_arguments(self):
@@ -188,6 +199,15 @@ class RouterCommandTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parse(["8443"], "h", 80), ("h", 8443))
         self.assertEqual(parse(["other"], "h", 80), ("other", 80))
         self.assertEqual(parse(["other", "22"], None, 80), ("other", 22))
+
+    def test_describe_latency(self):
+        self.assertEqual(app.describe_latency([20.0, 30.0], 0),
+                         "📶 Зв'язок стабільний: затримка 25 мс (від 20 до 30), втрат немає.")
+        self.assertEqual(app.describe_latency([20.0, 30.0, 40.0, 50.0], 1),
+                         "📶 Зв'язок майже стабільний: затримка 35 мс, втрачено 1 з 5.")
+        self.assertEqual(app.describe_latency([20.0, 40.0, 60.0], 2),
+                         "🟠 Зв'язок нестабільний: затримка 40 мс, втрачено 2 з 5.")
+        self.assertEqual(app.describe_latency([], 5), "🟠 Зв'язок нестабільний: усі 5 спроб втрачено.")
 
 
 def command_update(user_id, text="/router"):
@@ -263,6 +283,7 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         async def fake_monitor(bot, checker, tracker, admin_watch, internet_watch):
             self.assertIsInstance(admin_watch, app.broadcaster.AdminWatch)
             self.assertIsInstance(internet_watch, app.broadcaster.InternetWatch)
+            self.assertEqual(internet_watch.chat_ids, app.config.internet_alert_chat_ids())
             started.set()
             await asyncio.Event().wait()
 
