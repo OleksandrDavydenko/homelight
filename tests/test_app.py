@@ -7,7 +7,7 @@ from unittest import mock
 from telegram import Chat, Message, MessageEntity, Update, User
 from telegram.constants import ChatMemberStatus, ChatType
 from telegram.error import NetworkError
-from telegram.ext import CommandHandler
+from telegram.ext import CallbackQueryHandler, CommandHandler
 
 import app
 import light_checker
@@ -248,6 +248,99 @@ class TestmodeCommandTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Не зрозумів", texts[0])
 
 
+NAMES = {111: "Олена", 222: "Петро", 333: "Іван", 777: "Власник"}
+
+
+class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
+    """/admins і кнопки під ним. Власник — 777, Олена (111) додана в БД, Петро (222) — у Heroku."""
+
+    def setUp(self):
+        self.stored = "111"
+        self.recent_users = [333, 222, 111, 777]
+        patches = [
+            mock.patch.object(app.config, "ADMIN_CHAT_ID", 777),
+            mock.patch.object(app.config, "INTERNET_ALERT_CHAT_IDS", [222]),
+            mock.patch.object(app.db, "get_setting", side_effect=lambda key: self.stored),
+            mock.patch.object(app.db, "set_setting", side_effect=self.store),
+            mock.patch.object(app.db, "get_user_names",
+                              side_effect=lambda ids: {i: NAMES[i] for i in ids if i in NAMES}),
+            mock.patch.object(app.db, "get_recent_users", side_effect=self.recent),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def store(self, key, value):
+        self.assertEqual(key, app.admins.SETTING_KEY)
+        self.stored = value
+
+    def recent(self, limit, exclude):
+        return [(uid, NAMES[uid]) for uid in self.recent_users if uid not in exclude][:limit]
+
+    async def press(self, data, user_id=777, watch=None):
+        query = SimpleNamespace(data=data, from_user=SimpleNamespace(id=user_id),
+                                answer=mock.AsyncMock(), edit_message_text=mock.AsyncMock())
+        context = SimpleNamespace(bot=SimpleNamespace(send_message=mock.AsyncMock()),
+                                  bot_data={"internet_watch": watch} if watch else {})
+        await app.admins_callback(SimpleNamespace(callback_query=query), context)
+        return query, context
+
+    @staticmethod
+    def buttons(markup):
+        return [(b.text, b.callback_data) for row in markup.inline_keyboard for b in row]
+
+    async def test_list(self):
+        update = make_update(user_id=777)
+        await app.admins_command(update, make_context())
+        call = update.effective_message.reply_text.call_args
+        self.assertEqual(call.args[0], "👥 Хто отримує повідомлення про інтернет:\n"
+                                       "• Ви (власник)\n"
+                                       "• Олена (…111)\n"
+                                       "• Петро (…222) — задано в Heroku")
+        self.assertEqual(self.buttons(call.kwargs["reply_markup"]),
+                         [("❌ Олена (…111)", "adm:del:111"), ("➕ Додати", "adm:add")])
+
+    async def test_add_shows_only_people_who_are_not_admins_yet(self):
+        query, _ = await self.press("adm:add")
+        call = query.edit_message_text.call_args
+        self.assertTrue(call.args[0].startswith("Кого додати?"))
+        self.assertEqual(self.buttons(call.kwargs["reply_markup"]),
+                         [("Іван (…333)", "adm:pick:333"), ("⬅️ Назад", "adm:list")])
+
+    async def test_nobody_to_add(self):
+        self.recent_users = [111, 222, 777]
+        query, _ = await self.press("adm:add")
+        self.assertTrue(query.edit_message_text.call_args.args[0].startswith("Поки немає кого додати"))
+
+    async def test_pick_adds_admin_and_updates_recipients_at_once(self):
+        watch = app.broadcaster.InternetWatch([777, 222, 111])
+        query, context = await self.press("adm:pick:333", watch=watch)
+        self.assertEqual(self.stored, "111,333")
+        self.assertEqual(watch.chat_ids, [777, 222, 111, 333])
+        context.bot.send_message.assert_awaited_once_with(chat_id=333, text=app.WELCOME_ADMIN)
+        query.answer.assert_awaited_once_with("✅ Іван (…333) тепер отримує повідомлення про інтернет")
+        self.assertIn("• Іван (…333)", query.edit_message_text.call_args.args[0])
+
+    async def test_delete(self):
+        watch = app.broadcaster.InternetWatch([777, 222, 111])
+        query, _ = await self.press("adm:del:111", watch=watch)
+        self.assertEqual(self.stored, "")
+        self.assertEqual(watch.chat_ids, [777, 222])
+        query.answer.assert_awaited_once_with("Видалено: Олена (…111)")
+        self.assertNotIn("Олена", query.edit_message_text.call_args.args[0])
+
+    async def test_back_to_list(self):
+        query, _ = await self.press("adm:list")
+        self.assertTrue(query.edit_message_text.call_args.args[0].startswith("👥"))
+
+    async def test_buttons_rejected_for_anyone_but_owner(self):
+        query, context = await self.press("adm:pick:333", user_id=123)
+        query.answer.assert_awaited_once_with("Недоступно")
+        query.edit_message_text.assert_not_called()
+        context.bot.send_message.assert_not_called()
+        self.assertEqual(self.stored, "111")
+
+
 class AdminOnlyTest(unittest.TestCase):
     def router_handlers(self, admin_id, command="router"):
         with mock.patch.object(app.config, "TELEGRAM_TOKEN", "123:abc"), \
@@ -257,18 +350,33 @@ class AdminOnlyTest(unittest.TestCase):
                 if isinstance(h, CommandHandler) and command in h.commands]
 
     def test_admin_commands_only_for_admin(self):
-        for command in ("router", "testmode"):
+        for command in ("router", "testmode", "admins"):
             [handler] = self.router_handlers(777, command)
             self.assertTrue(handler.filters.check_update(command_update(777, f"/{command}")))
             self.assertFalse(handler.filters.check_update(command_update(123, f"/{command}")))
 
     def test_no_admin_commands_without_admin(self):
-        self.assertEqual(self.router_handlers(None), [])
-        self.assertEqual(self.router_handlers(None, "testmode"), [])
+        for command in ("router", "testmode", "admins"):
+            self.assertEqual(self.router_handlers(None, command), [])
+
+    def test_admin_buttons_handler_only_with_admin(self):
+        def callback_handlers(admin_id):
+            with mock.patch.object(app.config, "TELEGRAM_TOKEN", "123:abc"), \
+                    mock.patch.object(app.config, "ADMIN_CHAT_ID", admin_id):
+                application = app.build_application()
+            return [h for h in application.handlers[0] if isinstance(h, CallbackQueryHandler)]
+        self.assertEqual(len(callback_handlers(777)), 1)
+        self.assertEqual(callback_handlers(None), [])
+
+    def test_callback_queries_are_received(self):
+        self.assertIn(Update.CALLBACK_QUERY, app.ALLOWED_UPDATES)
 
     def test_admin_menu_has_router(self):
-        self.assertIn("router", [c.command for c in app.chat_commands(True, admin=True)])
+        admin_menu = [c.command for c in app.chat_commands(True, admin=True)]
+        self.assertIn("router", admin_menu)
+        self.assertIn("admins", admin_menu)
         self.assertNotIn("router", [c.command for c in app.chat_commands(True)])
+        self.assertNotIn("admins", [c.command for c in app.chat_commands(True)])
         with mock.patch.object(app.config, "ADMIN_CHAT_ID", 777):
             self.assertTrue(app.is_admin(777))
             self.assertFalse(app.is_admin(123))
@@ -323,7 +431,7 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         admin_call = application.bot.set_my_commands.call_args_list[-1]
         self.assertEqual(admin_call.kwargs["scope"].chat_id, 777)
         self.assertEqual([c.command for c in admin_call.args[0]],
-                         ["unsubscribe", "check", "help", "router", "testmode"])
+                         ["unsubscribe", "check", "help", "router", "testmode", "admins"])
 
     def test_build_application_registers_handlers(self):
         with mock.patch.object(app.config, "TELEGRAM_TOKEN", "123:abc"), \
