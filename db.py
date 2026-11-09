@@ -209,17 +209,31 @@ def set_setting(key: str, value: str) -> None:
     logger.info("Налаштування %s = %s", key, value)
 
 
-def get_recent_users(limit: int = 10, exclude=()) -> list[tuple[int, str]]:
-    """Останні користувачі, які натискали /start: [(telegram_id, first_name)], новіші першими."""
+def get_recent_users(limit: int = 10, exclude=(), offset: int = 0) -> list[tuple[int, str]]:
+    """Користувачі, які натискали /start: [(telegram_id, first_name)], новіші першими.
+
+    offset — скільки пропустити (для гортання сторінками).
+    """
     exclude = list(exclude) or [0]
 
     def query(cursor):
         cursor.execute("""
             SELECT telegram_id, COALESCE(first_name, '') FROM usersLightBot
             WHERE NOT (telegram_id = ANY(%s))
-            ORDER BY id DESC LIMIT %s;
-        """, (exclude, limit))
+            ORDER BY id DESC LIMIT %s OFFSET %s;
+        """, (exclude, limit, offset))
         return [(int(row[0]), row[1]) for row in cursor.fetchall()]
+    return _run(query)
+
+
+def count_users(exclude=()) -> int:
+    """Скільки користувачів натискали /start, не рахуючи exclude."""
+    exclude = list(exclude) or [0]
+
+    def query(cursor):
+        cursor.execute("SELECT COUNT(*) FROM usersLightBot WHERE NOT (telegram_id = ANY(%s));",
+                       (exclude,))
+        return int(cursor.fetchone()[0])
     return _run(query)
 
 

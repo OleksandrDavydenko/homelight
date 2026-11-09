@@ -306,14 +306,14 @@ async def router_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 # ---------- /admins: хто отримує повідомлення про інтернет ----------
 
-ADD_CANDIDATES_LIMIT = 10
+ADD_PAGE_SIZE = 8  # скільки користувачів показувати на одній сторінці «➕ Додати»
 WELCOME_ADMIN = ("👋 Вас додано: ви отримуватимете повідомлення, коли вдома зникає "
                  "й повертається інтернет.")
 
 
 def user_label(user_id: int, name: str | None) -> str:
-    """Ім'я та останні цифри ID, щоб розрізнити однакові імена."""
-    return f"{(name or '').strip() or 'Без імені'} (…{str(user_id)[-4:]})"
+    """Ім'я та повний Telegram ID, щоб розрізнити однакові імена."""
+    return f"{(name or '').strip() or 'Без імені'} · {user_id}"
 
 
 async def admins_view() -> tuple[str, InlineKeyboardMarkup]:
@@ -331,7 +331,7 @@ async def admins_view() -> tuple[str, InlineKeyboardMarkup]:
             lines.append(f"• {label}")
             buttons.append([InlineKeyboardButton(f"❌ {label}", callback_data=f"adm:del:{user_id}")])
         else:
-            lines.append(f"• {label} — задано в Heroku")
+            lines.append(f"• {label} (задано в Heroku)")
     if not others:
         lines.append("\nЩоб додати людину, попросіть її натиснути /start у боті, "
                      "а потім натисніть «➕ Додати».")
@@ -339,17 +339,32 @@ async def admins_view() -> tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), InlineKeyboardMarkup(buttons)
 
 
-async def add_admin_view() -> tuple[str, InlineKeyboardMarkup]:
-    """Останні користувачі, які ще не отримують повідомлень про інтернет."""
+async def add_admin_view(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+    """Користувачі, які ще не отримують повідомлень про інтернет, сторінками (новіші першими)."""
     current = admins.recipients(await asyncio.to_thread(admins.load_ids))
-    users = await asyncio.to_thread(db.get_recent_users, ADD_CANDIDATES_LIMIT, current)
+    total = await asyncio.to_thread(db.count_users, current)
+    pages = max(1, -(-total // ADD_PAGE_SIZE))  # округлення вгору
+    page = min(max(page, 0), pages - 1)
+    users = await asyncio.to_thread(db.get_recent_users, ADD_PAGE_SIZE, current,
+                                    page * ADD_PAGE_SIZE)
+
     if users:
-        text = "Кого додати? Людина має спершу натиснути /start у боті."
+        text = "Кого додати? Людина має спершу натиснути /start у боті. Нові користувачі — вгорі."
+        if pages > 1:
+            text += f"\n\nСторінка {page + 1} з {pages} (усього {total})."
     else:
         text = "Поки немає кого додати: попросіть людину натиснути /start у боті."
+
     buttons = [[InlineKeyboardButton(user_label(uid, name), callback_data=f"adm:pick:{uid}")]
                for uid, name in users]
-    buttons.append([InlineKeyboardButton("⬅️ Назад", callback_data="adm:list")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Попередні", callback_data=f"adm:add:{page - 1}"))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton("Далі ➡️", callback_data=f"adm:add:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton("↩️ До списку адмінів", callback_data="adm:list")])
     return text, InlineKeyboardMarkup(buttons)
 
 
@@ -363,7 +378,7 @@ async def admins_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def admins_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Кнопки під /admins: adm:list | adm:add | adm:pick:<id> | adm:del:<id>."""
+    """Кнопки під /admins: adm:list | adm:add[:<сторінка>] | adm:pick:<id> | adm:del:<id>."""
     query = update.callback_query
     if query is None:
         return
@@ -401,7 +416,8 @@ async def admins_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             watch.chat_ids = admins.recipients(ids)
         text, markup = await admins_view()
     elif action == "add":
-        text, markup = await add_admin_view()
+        page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        text, markup = await add_admin_view(page)
     else:
         text, markup = await admins_view()
 

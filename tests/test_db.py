@@ -102,6 +102,9 @@ class DbTest(unittest.TestCase):
         self.assertEqual(db.get_recent_users(), [(333, "Іван"), (222, "Петро"), (111, "Олена")])
         self.assertEqual(db.get_recent_users(limit=2), [(333, "Іван"), (222, "Петро")])
         self.assertEqual(db.get_recent_users(exclude=[333, 111]), [(222, "Петро")])
+        self.assertEqual(db.get_recent_users(limit=2, offset=2), [(111, "Олена")])
+        self.assertEqual(db.count_users(), 3)
+        self.assertEqual(db.count_users(exclude=[111]), 2)
         self.assertEqual(db.get_user_names([111, 333, 999]), {111: "Олена", 333: "Іван"})
         self.assertEqual(db.get_user_names([]), {})
 
