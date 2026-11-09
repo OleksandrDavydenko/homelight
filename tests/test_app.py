@@ -253,7 +253,7 @@ USERNAMES = {333: "ivan_k"}  # @username відомий лише для Іван
 
 
 class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
-    """/admins і кнопки під ним. Власник — 777, Олена (111) додана в БД, Петро (222) — у Heroku."""
+    """/special і кнопки під ним. Власник — 777, Олена (111) додана в БД, Петро (222) — у Heroku."""
 
     def setUp(self):
         self.stored = "111"
@@ -306,7 +306,7 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
         update = make_update(user_id=777)
         await app.admins_command(update, make_context())
         call = update.effective_message.reply_text.call_args
-        self.assertEqual(call.args[0], "👥 Хто отримує повідомлення про інтернет:\n"
+        self.assertEqual(call.args[0], "👥 Спеціальні користувачі\nОтримують повідомлення про зникнення й відновлення інтернету вдома:\n"
                                        "• Ви (власник)\n"
                                        "• Олена · 111\n"
                                        "• Петро · 222 (задано в Heroku)")
@@ -318,7 +318,7 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
         update = make_update(user_id=777)
         await app.admins_command(update, make_context())
         self.assertEqual(update.effective_message.reply_text.call_args.args[0],
-                         "👥 Хто отримує повідомлення про інтернет:\n"
+                         "👥 Спеціальні користувачі\nОтримують повідомлення про зникнення й відновлення інтернету вдома:\n"
                          "• Ви (власник) 🔕\n"
                          "• Олена · 111 🔕\n"
                          "• Петро · 222 (задано в Heroku)\n"
@@ -344,10 +344,10 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
     async def test_add_shows_only_people_who_are_not_admins_yet(self):
         query, _ = await self.press("adm:add")
         call = query.edit_message_text.call_args
-        self.assertTrue(call.args[0].startswith("Кого додати?"))
+        self.assertTrue(call.args[0].startswith("Кого додати до спеціальних користувачів?"))
         self.assertNotIn("Сторінка", call.args[0])  # усі вміщуються на одну сторінку
         self.assertEqual(self.buttons(call.kwargs["reply_markup"]),
-                         [("Іван @ivan_k · 333", "adm:pick:333"), ("↩️ До списку адмінів", "adm:list")])
+                         [("Іван @ivan_k · 333", "adm:pick:333"), ("↩️ Назад до списку", "adm:list")])
 
     async def test_add_pages(self):
         self.recent_users = list(range(1001, 1021)) + [111, 222, 777]  # 20 кандидатів, по 8 на сторінку
@@ -357,7 +357,7 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Сторінка 1 з 3 (усього 20).", call.args[0])
         buttons = self.buttons(call.kwargs["reply_markup"])
         self.assertEqual(buttons[0], ("User1001 · 1001", "adm:pick:1001"))
-        self.assertEqual(buttons[8:], [("Далі ➡️", "adm:add:1"), ("↩️ До списку адмінів", "adm:list")])
+        self.assertEqual(buttons[8:], [("Далі ➡️", "adm:add:1"), ("↩️ Назад до списку", "adm:list")])
 
         query, _ = await self.press("adm:add:1")
         call = query.edit_message_text.call_args
@@ -365,12 +365,12 @@ class AdminsCommandTest(unittest.IsolatedAsyncioTestCase):
         buttons = self.buttons(call.kwargs["reply_markup"])
         self.assertEqual(buttons[0], ("User1009 · 1009", "adm:pick:1009"))
         self.assertEqual(buttons[8:], [("⬅️ Попередні", "adm:add:0"), ("Далі ➡️", "adm:add:2"),
-                                       ("↩️ До списку адмінів", "adm:list")])
+                                       ("↩️ Назад до списку", "adm:list")])
 
         query, _ = await self.press("adm:add:2")
         buttons = self.buttons(query.edit_message_text.call_args.kwargs["reply_markup"])
         self.assertEqual(len(buttons), 4 + 2)  # 4 останні + «Попередні» + «До списку»
-        self.assertEqual(buttons[-2:], [("⬅️ Попередні", "adm:add:1"), ("↩️ До списку адмінів", "adm:list")])
+        self.assertEqual(buttons[-2:], [("⬅️ Попередні", "adm:add:1"), ("↩️ Назад до списку", "adm:list")])
 
         query, _ = await self.press("adm:add:99")  # за межами — остання сторінка
         self.assertIn("Сторінка 3 з 3", query.edit_message_text.call_args.args[0])
@@ -462,13 +462,13 @@ class AdminOnlyTest(unittest.TestCase):
                 if isinstance(h, CommandHandler) and command in h.commands]
 
     def test_admin_commands_only_for_admin(self):
-        for command in ("router", "testmode", "admins"):
+        for command in ("router", "testmode", "special", "admins"):  # /admins — стара назва
             [handler] = self.router_handlers(777, command)
             self.assertTrue(handler.filters.check_update(command_update(777, f"/{command}")))
             self.assertFalse(handler.filters.check_update(command_update(123, f"/{command}")))
 
     def test_no_admin_commands_without_admin(self):
-        for command in ("router", "testmode", "admins"):
+        for command in ("router", "testmode", "special", "admins"):
             self.assertEqual(self.router_handlers(None, command), [])
 
     def test_admin_buttons_handler_only_with_admin(self):
@@ -486,9 +486,9 @@ class AdminOnlyTest(unittest.TestCase):
     def test_admin_menu_has_router(self):
         admin_menu = [c.command for c in app.chat_commands(True, admin=True)]
         self.assertIn("router", admin_menu)
-        self.assertIn("admins", admin_menu)
+        self.assertIn("special", admin_menu)
         self.assertNotIn("router", [c.command for c in app.chat_commands(True)])
-        self.assertNotIn("admins", [c.command for c in app.chat_commands(True)])
+        self.assertNotIn("special", [c.command for c in app.chat_commands(True)])
         with mock.patch.object(app.config, "ADMIN_CHAT_ID", 777):
             self.assertTrue(app.is_admin(777))
             self.assertFalse(app.is_admin(123))
@@ -543,7 +543,7 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         admin_call = application.bot.set_my_commands.call_args_list[-1]
         self.assertEqual(admin_call.kwargs["scope"].chat_id, 777)
         self.assertEqual([c.command for c in admin_call.args[0]],
-                         ["unsubscribe", "check", "help", "router", "testmode", "admins"])
+                         ["unsubscribe", "check", "help", "router", "testmode", "special"])
 
     def test_build_application_registers_handlers(self):
         with mock.patch.object(app.config, "TELEGRAM_TOKEN", "123:abc"), \
