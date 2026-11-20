@@ -5,6 +5,7 @@
 дублював би сповіщення.
 """
 import asyncio
+import json
 import logging
 import time
 
@@ -22,6 +23,7 @@ from light_checker import (
     format_duration,
     format_moment,
 )
+from reserve import ReserveTracker, format_reserve_event
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +208,50 @@ class InternetWatch:
         await self._notify(bot, text)
 
 
+RESERVE_STATE_KEY = "reserve_state"
+
+
+def load_reserve_state() -> dict | None:
+    """Збережений стан резерву (bot_settings); None — немає або пошкоджений."""
+    raw = db.get_setting(RESERVE_STATE_KEY)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        logger.warning("Пошкоджений стан резерву в БД — починаю з нуля")
+        return None
+    return data if isinstance(data, dict) else None
+
+
+class ReserveWatch:
+    """Робота на резерві — повідомлення лише власнику (ADMIN_CHAT_ID).
+
+    Логіку визначення резерву див. у reserve.py. Стан зберігається в БД
+    (bot_settings), тож перезапуск бота не дає повторних повідомлень.
+    """
+
+    def __init__(self, chat_id: int | None, tracker: ReserveTracker | None = None):
+        self.chat_id = chat_id
+        self.tracker = tracker or ReserveTracker()
+
+    async def observe(self, bot: Bot, plug: Reading | None, city: StateTracker,
+                      internet: bool | None, now: int) -> None:
+        if not self.chat_id:
+            return
+        before = self.tracker.to_dict()
+        events = self.tracker.observe(plug, city.has_light, city.since, internet, now)
+        state = self.tracker.to_dict()
+        if state != before:
+            try:
+                await asyncio.to_thread(db.set_setting, RESERVE_STATE_KEY, json.dumps(state))
+            except Exception:
+                logger.exception("Не вдалося зберегти стан резерву в БД")
+        for event in events:
+            logger.info("Резерв: %s", event)
+            await _send(bot, self.chat_id, format_reserve_event(event, now))
+
+
 async def _check_internet(checker: LightChecker) -> bool | None:
     """Чи є інтернет удома (за роутером); None — перевірка не налаштована чи недоступна."""
     if not getattr(checker, "router_host", None):
@@ -222,9 +268,10 @@ async def _check_internet(checker: LightChecker) -> bool | None:
 
 async def run_check(bot: Bot, checker: LightChecker, tracker: StateTracker,
                     admin_watch: AdminWatch | None = None,
-                    internet_watch: InternetWatch | None = None) -> float:
+                    internet_watch: InternetWatch | None = None,
+                    reserve_watch: ReserveWatch | None = None) -> float:
     """Одна перевірка: інтернет удома → читання Shelly → підтвердження зміни →
-    збереження → розсилка.
+    збереження → розсилка → резерв (лише власнику).
 
     Повертає, через скільки секунд робити наступну перевірку.
     """
@@ -259,18 +306,28 @@ async def run_check(bot: Bot, checker: LightChecker, tracker: StateTracker,
             logger.info("Зміна стану: %s", change)
             await notify_subscribers(bot, format_alert(change))
 
+    if reserve_watch is not None:
+        # Після tracker.observe — щоб стан світла від міста був актуальний
+        try:
+            await reserve_watch.observe(bot, reading.plug, tracker,
+                                        internet if internet is not None else reading.internet, now)
+        except Exception:
+            logger.exception("Не вдалося обробити стан резерву")
+
     pending = tracker.pending or (internet_watch is not None and internet_watch.pending)
     return CONFIRM_INTERVAL if pending else POLL_INTERVAL
 
 
 async def monitor_loop(bot: Bot, checker: LightChecker, tracker: StateTracker,
                        admin_watch: AdminWatch | None = None,
-                       internet_watch: InternetWatch | None = None) -> None:
+                       internet_watch: InternetWatch | None = None,
+                       reserve_watch: ReserveWatch | None = None) -> None:
     logger.info("Фонова перевірка світла запущена")
     while True:
         delay = POLL_INTERVAL
         try:
-            delay = await run_check(bot, checker, tracker, admin_watch, internet_watch)
+            delay = await run_check(bot, checker, tracker, admin_watch, internet_watch,
+                                    reserve_watch)
         except asyncio.CancelledError:
             raise
         except Exception:

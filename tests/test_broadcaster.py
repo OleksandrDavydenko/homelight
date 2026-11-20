@@ -334,5 +334,106 @@ class TestModeTest(unittest.IsolatedAsyncioTestCase):
                          [mock.call("test_mode", "1"), mock.call("test_mode", "0")])
 
 
+
+T0 = 1_700_000_000
+
+
+def plug_on(boot):
+    return Reading(has_light=True, fetched_at=0, voltage=229.0, online=True, boot_time=boot,
+                   output=False)
+
+
+class ReserveWatchTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        patcher = mock.patch.object(broadcaster.db, "set_setting")
+        self.set_setting = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_only_owner_gets_reserve_messages_and_state_is_saved(self):
+        bot, watch = FakeBot(), broadcaster.ReserveWatch(ADMIN)
+        city = StateTracker(False, T0)
+        await watch.observe(bot, plug_on(T0 + 600), city, True, T0 + 700)
+        self.assertEqual(len(bot.sent), 1)
+        self.assertEqual(bot.sent[0][0], ADMIN)
+        self.assertTrue(bot.sent[0][1].startswith("🔋 Ви перейшли на резерв"))
+        key, value = self.set_setting.call_args.args
+        self.assertEqual(key, broadcaster.RESERVE_STATE_KEY)
+        self.assertTrue(broadcaster.json.loads(value)["on"])
+
+    async def test_state_saved_only_when_changed(self):
+        bot = FakeBot()
+        watch = broadcaster.ReserveWatch(ADMIN)
+        city = StateTracker(True, T0)
+        for now in (T0 + 100, T0 + 200):
+            await watch.observe(bot, plug_on(T0 - 3600), city, True, now)
+        self.set_setting.assert_not_called()
+        self.assertEqual(bot.sent, [])
+
+    async def test_saving_failure_does_not_stop_message(self):
+        self.set_setting.side_effect = RuntimeError("db down")
+        bot, watch = FakeBot(), broadcaster.ReserveWatch(ADMIN)
+        await watch.observe(bot, plug_on(T0 + 600), StateTracker(False, T0), True, T0 + 700)
+        self.assertEqual(len(bot.sent), 1)
+
+    async def test_disabled_without_owner(self):
+        bot, watch = FakeBot(), broadcaster.ReserveWatch(None)
+        await watch.observe(bot, plug_on(T0 + 600), StateTracker(False, T0), True, T0 + 700)
+        self.assertEqual(bot.sent, [])
+        self.assertFalse(watch.tracker.on)
+
+    def test_load_state(self):
+        for raw, expected in ((None, None), ("", None), ("not json", None), ("[1]", None),
+                              ('{"on": true}', {"on": True})):
+            with mock.patch.object(broadcaster.db, "get_setting", return_value=raw):
+                self.assertEqual(broadcaster.load_reserve_state(), expected, raw)
+
+
+class PlugChecker:
+    def __init__(self, *readings):
+        self.readings = list(readings)
+
+    def get_reading(self):
+        return self.readings.pop(0)
+
+
+@mock.patch.object(broadcaster, "SEND_DELAY", 0)
+@mock.patch.object(broadcaster.db, "get_setting", NOT_TEST_MODE)
+class RunCheckReserveTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        patches = [
+            mock.patch.object(broadcaster.db, "get_all_subscribed_users", return_value=[42]),
+            mock.patch.object(broadcaster.db, "save_light_state"),
+            mock.patch.object(broadcaster.db, "set_setting"),
+            mock.patch.object(broadcaster.config, "ADMIN_CHAT_ID", ADMIN),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    async def test_reserve_uses_city_state_after_observe(self):
+        # Місто зникло (модуль офлайн, роутер відповідає), а розетка вже на резерві
+        city_off = Reading(has_light=False, fetched_at=0, online=False, internet=True,
+                           plug=plug_on(T0 + 30))
+        checker = PlugChecker(city_off, city_off)
+        bot, tracker = FakeBot(), StateTracker(True, T0 - 3600)
+        watch = broadcaster.ReserveWatch(ADMIN)
+        with mock.patch.object(broadcaster.time, "time", side_effect=[T0, T0 + 20]):
+            await broadcaster.run_check(bot, checker, tracker, reserve_watch=watch)
+            self.assertEqual(bot.sent, [])  # відключення ще не підтверджене
+            await broadcaster.run_check(bot, checker, tracker, reserve_watch=watch)
+        self.assertEqual([chat for chat, _ in bot.sent], [42, ADMIN])
+        self.assertEqual(bot.sent[0][1], "🔴 СВІТЛО ПРОПАЛО!")
+        self.assertTrue(bot.sent[1][1].startswith("🔋 Ви перейшли на резерв"))
+
+    async def test_reserve_errors_do_not_break_check(self):
+        watch = mock.Mock()
+        watch.observe = mock.AsyncMock(side_effect=RuntimeError("boom"))
+        reading = Reading(has_light=True, fetched_at=0, online=True, plug=plug_on(T0))
+        delay = await broadcaster.run_check(FakeBot(), PlugChecker(reading), StateTracker(True, T0),
+                                            reserve_watch=watch)
+        self.assertEqual(delay, broadcaster.POLL_INTERVAL)
+        self.assertIs(watch.observe.call_args.args[1], reading.plug)
+
+
 if __name__ == "__main__":
     unittest.main()

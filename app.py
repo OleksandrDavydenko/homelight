@@ -40,6 +40,7 @@ from light_checker import (
     measure_router_latency,
     probe_router,
 )
+from reserve import ReserveTracker, format_reserve_status
 
 logger = logging.getLogger(__name__)
 
@@ -134,8 +135,15 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         checker.get_reading,
         max_age=CHECK_CACHE_SECONDS, attempts=CHECK_ATTEMPTS, timeout=CHECK_TIMEOUT,
     )
-    await message.reply_text(format_status_message(reading, tracker, int(time.time())),
-                             reply_markup=await keyboard_for(user.id))
+    now = int(time.time())
+    text = format_status_message(reading, tracker, now)
+    reserve_watch = context.bot_data.get("reserve_watch")
+    if reserve_watch is not None and is_admin(user.id):
+        # Резерв — лише для власника
+        reserve_line = format_reserve_status(reserve_watch.tracker, now)
+        if reserve_line:
+            text += "\n\n" + reserve_line
+    await message.reply_text(text, reply_markup=await keyboard_for(user.id))
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -503,7 +511,8 @@ async def post_init(app: Application) -> None:
     await asyncio.to_thread(db.init_db)
     state = await asyncio.to_thread(db.get_light_state)
 
-    checker = LightChecker()
+    reserve_watch = await create_reserve_watch()
+    checker = LightChecker(plug_mac=config.PLUG_MAC if reserve_watch is not None else None)
     tracker = StateTracker.from_dict(state)
     admin_watch = broadcaster.AdminWatch(config.ADMIN_CHAT_ID)
     db_admin_ids = await asyncio.to_thread(admins.load_ids)
@@ -512,8 +521,10 @@ async def post_init(app: Application) -> None:
     app.bot_data["tracker"] = tracker
     # /special змінює список отримувачів на льоту, без перезапуску
     app.bot_data["internet_watch"] = internet_watch
+    app.bot_data["reserve_watch"] = reserve_watch
     app.bot_data["monitor_task"] = asyncio.create_task(
-        broadcaster.monitor_loop(app.bot, checker, tracker, admin_watch, internet_watch),
+        broadcaster.monitor_loop(app.bot, checker, tracker, admin_watch, internet_watch,
+                                 reserve_watch),
         name="light-monitor",
     )
 
@@ -536,6 +547,28 @@ async def post_init(app: Application) -> None:
             await update_chat_commands(app.bot, config.ADMIN_CHAT_ID, subscribed)
         except Exception:
             logger.exception("Не вдалося встановити меню команд власника")
+
+
+async def create_reserve_watch() -> "broadcaster.ReserveWatch | None":
+    """Повідомлення власнику про резерв, якщо задано PLUG_MAC і ADMIN_CHAT_ID."""
+    if not config.PLUG_MAC:
+        return None
+    if not config.ADMIN_CHAT_ID:
+        logger.warning("PLUG_MAC задано, але ADMIN_CHAT_ID немає — повідомлення про резерв вимкнені")
+        return None
+    if config.PLUG_MAC == config.TARGET_MAC:
+        logger.warning("PLUG_MAC збігається з TARGET_MAC — повідомлення про резерв вимкнені "
+                       "(PLUG_MAC — це розетка після перемикача резерву, а не модуль на лінії міста)")
+        return None
+    try:
+        state = await asyncio.to_thread(broadcaster.load_reserve_state)
+    except Exception:
+        logger.exception("Не вдалося прочитати стан резерву з БД — починаю з нуля")
+        state = None
+    tracker = ReserveTracker.from_dict(state)
+    logger.info("Повідомлення про резерв увімкнені%s",
+                " (зараз резерв)" if tracker.on else "")
+    return broadcaster.ReserveWatch(config.ADMIN_CHAT_ID, tracker)
 
 
 async def log_router_check(checker: LightChecker) -> None:
