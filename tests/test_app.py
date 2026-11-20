@@ -12,6 +12,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, TypeHandler
 import app
 import light_checker
 from light_checker import Reading, StateTracker
+from reserve import ReserveTracker
 
 
 def make_update(user_id=7, first_name="Олена", text=None):
@@ -74,6 +75,37 @@ class HandlersTest(unittest.IsolatedAsyncioTestCase):
             max_age=app.CHECK_CACHE_SECONDS, attempts=app.CHECK_ATTEMPTS, timeout=app.CHECK_TIMEOUT)
         self.assertIn("СВІТЛО Є", update.effective_message.reply_text.call_args.args[0])
         self.assertEqual((tracker.has_light, tracker.since), (False, 0))
+
+    async def test_check_shows_reserve_only_to_owner(self):
+        now = 1_700_000_000
+        checker = mock.Mock()
+        checker.get_reading.return_value = Reading(has_light=False, fetched_at=now, online=False,
+                                                   internet=True)
+        watch = app.broadcaster.ReserveWatch(777, ReserveTracker(on=True, since=now - 3900))
+        for user_id, expected in ((777, True), (123, False)):
+            update = make_update(user_id=user_id)
+            context = make_context(checker=checker, tracker=StateTracker(False, now - 4000),
+                                   reserve_watch=watch)
+            with mock.patch.object(app.config, "ADMIN_CHAT_ID", 777), \
+                    mock.patch.object(app.db, "get_user_subscription", return_value=True), \
+                    mock.patch.object(app.time, "time", return_value=now):
+                await app.check(update, context)
+            text = update.effective_message.reply_text.call_args.args[0]
+            self.assertIn("СВІТЛА НЕМАЄ", text)
+            self.assertEqual("🔋 Ви на резерві з" in text, expected, text)
+            if expected:
+                self.assertIn("1 год 5 хв", text)
+
+    async def test_check_without_reserve_has_no_reserve_line(self):
+        checker = mock.Mock()
+        checker.get_reading.return_value = Reading(has_light=True, fetched_at=0, voltage=230)
+        watch = app.broadcaster.ReserveWatch(777, ReserveTracker())
+        update = make_update(user_id=777)
+        context = make_context(checker=checker, tracker=StateTracker(True, 0), reserve_watch=watch)
+        with mock.patch.object(app.config, "ADMIN_CHAT_ID", 777), \
+                mock.patch.object(app.db, "get_user_subscription", return_value=True):
+            await app.check(update, context)
+        self.assertNotIn("резерв", update.effective_message.reply_text.call_args.args[0])
 
     async def test_help_and_info_restore_keyboard(self):
         for handler in (app.help_command, app.info):
@@ -500,10 +532,12 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
     async def test_monitor_starts_even_if_menu_fails_and_stops_cleanly(self):
         started = asyncio.Event()
 
-        async def fake_monitor(bot, checker, tracker, admin_watch, internet_watch):
+        async def fake_monitor(bot, checker, tracker, admin_watch, internet_watch, reserve_watch):
             self.assertIsInstance(admin_watch, app.broadcaster.AdminWatch)
             self.assertIsInstance(internet_watch, app.broadcaster.InternetWatch)
             self.assertEqual(internet_watch.chat_ids, app.config.internet_alert_chat_ids())
+            self.assertIsNone(reserve_watch)  # PLUG_MAC не задано
+            self.assertIsNone(checker.plug_mac)
             started.set()
             await asyncio.Event().wait()
 
@@ -544,6 +578,57 @@ class LifecycleTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(admin_call.kwargs["scope"].chat_id, 777)
         self.assertEqual([c.command for c in admin_call.args[0]],
                          ["unsubscribe", "check", "help", "router", "testmode", "special"])
+
+    async def test_reserve_watch_created_with_plug_mac(self):
+        captured = {}
+
+        async def fake_monitor(bot, checker, tracker, admin_watch, internet_watch, reserve_watch):
+            captured.update(checker=checker, reserve_watch=reserve_watch)
+            await asyncio.Event().wait()
+
+        saved = '{"on": true, "since": 100, "plug_boot": 100, "last_seen": 200}'
+
+        def get_setting(key):
+            return saved if key == app.broadcaster.RESERVE_STATE_KEY else None
+
+        application = SimpleNamespace(bot=SimpleNamespace(set_my_commands=mock.AsyncMock()), bot_data={})
+        with mock.patch.object(app.config, "ADMIN_CHAT_ID", 777), \
+                mock.patch.object(app.config, "PLUG_MAC", "48f6eeb6ec00"), \
+                mock.patch.object(app.config, "TARGET_MAC", "dcda0cdfce18"), \
+                mock.patch.object(app.db, "init_db"), \
+                mock.patch.object(app.db, "get_light_state", return_value=None), \
+                mock.patch.object(app.db, "get_user_subscription", return_value=True), \
+                mock.patch.object(app.db, "get_setting", side_effect=get_setting), \
+                mock.patch.object(app.broadcaster, "monitor_loop", fake_monitor):
+            await app.post_init(application)
+            await asyncio.sleep(0)
+            await app.post_stop(application)
+
+        watch = application.bot_data["reserve_watch"]
+        self.assertIs(captured["reserve_watch"], watch)
+        self.assertEqual(watch.chat_id, 777)
+        self.assertTrue(watch.tracker.on)
+        self.assertEqual(watch.tracker.since, 100)
+        self.assertEqual(captured["checker"].plug_mac, "48f6eeb6ec00")
+
+    async def test_reserve_watch_disabled(self):
+        cases = [
+            ({"PLUG_MAC": None, "ADMIN_CHAT_ID": 777}, "без PLUG_MAC"),
+            ({"PLUG_MAC": "48f6eeb6ec00", "ADMIN_CHAT_ID": None}, "без власника"),
+            ({"PLUG_MAC": "dcda0cdfce18", "ADMIN_CHAT_ID": 777}, "той самий пристрій"),
+        ]
+        for settings, name in cases:
+            with self.subTest(name), \
+                    mock.patch.multiple(app.config, TARGET_MAC="dcda0cdfce18", **settings), \
+                    mock.patch.object(app.db, "get_setting", return_value=None):
+                self.assertIsNone(await app.create_reserve_watch())
+
+    async def test_broken_reserve_state_starts_fresh(self):
+        with mock.patch.multiple(app.config, PLUG_MAC="48f6eeb6ec00", TARGET_MAC="dcda0cdfce18",
+                                 ADMIN_CHAT_ID=777), \
+                mock.patch.object(app.db, "get_setting", side_effect=RuntimeError("db down")):
+            watch = await app.create_reserve_watch()
+        self.assertFalse(watch.tracker.on)
 
     def test_build_application_registers_handlers(self):
         with mock.patch.object(app.config, "TELEGRAM_TOKEN", "123:abc"), \

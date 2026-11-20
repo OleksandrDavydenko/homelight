@@ -6,8 +6,20 @@ TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 # Shelly Cloud
 SHELLY_AUTH_KEY = os.getenv("SHELLY_AUTH_KEY")
 SHELLY_BASE_URL = os.getenv("SHELLY_BASE_URL", "https://shelly-237-eu.shelly.cloud")
-# MAC пристрою; порожнє значення — брати перший пристрій з акаунта
-TARGET_MAC = os.getenv("TARGET_MAC", "48f6eeb6ec00") or None
+
+
+def normalize_mac(value: str | None) -> str | None:
+    """«DC:DA:0C:DF:CE:18» → «dcda0cdfce18»; порожнє значення — None."""
+    mac = (value or "").strip().lower().replace(":", "").replace("-", "")
+    return mac or None
+
+
+# MAC модуля на лінії міста; порожнє значення — брати перший пристрій з акаунта
+TARGET_MAC = normalize_mac(os.getenv("TARGET_MAC", "48f6eeb6ec00"))
+
+# MAC розетки в квартирі після перемикача «місто — резерв». Якщо задано, власник
+# отримує повідомлення про роботу на резерві. Порожньо — вимкнено.
+PLUG_MAC = normalize_mac(os.getenv("PLUG_MAC"))
 
 # Домашній роутер на ДБЖ (білий IP або домен). Якщо Shelly офлайн, а роутер
 # відповідає, — інтернет у будинку є, отже світла в місті немає. Порожньо — вимкнено.

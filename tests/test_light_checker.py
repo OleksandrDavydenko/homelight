@@ -142,6 +142,68 @@ class ParseReadingTest(unittest.TestCase):
         self.assertIsNone(self.parse({MAC: device(sys={"unixtime": NOW})}).boot_time)
 
 
+    def test_mac_with_colons(self):
+        checker, _ = make_checker(mac="48:F6:EE:B6:EC:00")
+        self.assertTrue(checker.parse_reading({"devices_status": {MAC: device()}}, NOW).has_light)
+
+    def test_relay_output(self):
+        r = self.parse({MAC: {"switch:0": {"voltage": 230, "output": True}}})
+        self.assertIs(r.output, True)
+        self.assertIsNone(self.parse({MAC: device()}).output)
+
+
+PLUG = "dcda0cdfce99"
+
+
+class ParsePlugTest(unittest.TestCase):
+    def checker(self, plug_mac=PLUG):
+        return LightChecker(auth_key="key", base_url="https://shelly.test", target_mac=MAC,
+                            session=FakeSession(), router_host=None, plug_mac=plug_mac)
+
+    def test_plug_is_parsed_from_same_response(self):
+        plug_status = {"switch:0": {"voltage": 228.4, "freq": 50.0, "output": False},
+                       "sys": {"unixtime": NOW - 5, "uptime": 600}}
+        r = self.checker().parse_reading({"devices_status": {MAC: device(), PLUG: plug_status}}, NOW)
+        self.assertTrue(r.has_light)  # стан модуля міста не змінюється
+        self.assertIsNotNone(r.plug)
+        self.assertIs(r.plug.has_light, True)
+        self.assertIs(r.plug.online, True)
+        self.assertIs(r.plug.output, False)
+        self.assertEqual(r.plug.voltage, 228.4)
+        self.assertEqual(r.plug.boot_time, NOW - 605)
+
+    def test_plug_missing_or_offline(self):
+        r = self.checker().parse_reading({"devices_status": {MAC: device()}}, NOW)
+        self.assertIs(r.plug.online, False)
+        self.assertIs(r.plug.has_light, False)
+        offline = device(_dev_info={"online": False})
+        r = self.checker().parse_reading({"devices_status": {MAC: device(), PLUG: offline}}, NOW)
+        self.assertIs(r.plug.online, False)
+
+    def test_city_offline_plug_online(self):
+        r = self.checker().parse_reading(
+            {"devices_status": {MAC: device(_dev_info={"online": False}), PLUG: device(229)}}, NOW)
+        self.assertIs(r.has_light, False)
+        self.assertIs(r.online, False)
+        self.assertIs(r.plug.has_light, True)
+
+    def test_no_plug_mac(self):
+        r = self.checker(plug_mac=None).parse_reading(
+            {"devices_status": {MAC: device(), PLUG: device()}}, NOW)
+        self.assertIsNone(r.plug)
+
+    def test_plug_survives_router_check(self):
+        checker = self.checker()
+        checker.router_host = "203.0.113.1"
+        response = FakeResponse(json_data=payload({MAC: device(_dev_info={"online": False}),
+                                                   PLUG: device(229)}))
+        checker._session = FakeSession(response)
+        with mock.patch.object(light_checker, "probe_router", return_value=light_checker.ROUTER_OPEN):
+            r = checker.get_reading()
+        self.assertIs(r.internet, True)
+        self.assertIs(r.plug.has_light, True)
+
+
 @mock.patch.object(light_checker.time, "sleep")
 class FetchTest(unittest.TestCase):
     def test_retries_after_429(self, sleep):

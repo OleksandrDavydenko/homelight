@@ -13,6 +13,16 @@ class ParseChatIdsTest(unittest.TestCase):
         self.assertEqual(config.parse_chat_ids("123, abc, 4.5"), ([123], ["abc", "4.5"]))
 
 
+class NormalizeMacTest(unittest.TestCase):
+    def test_normalize(self):
+        self.assertEqual(config.normalize_mac("DC:DA:0C:DF:CE:18"), "dcda0cdfce18")
+        self.assertEqual(config.normalize_mac(" 48F6EEB6EC00 "), "48f6eeb6ec00")
+        self.assertEqual(config.normalize_mac("dc-da-0c-df-ce-18"), "dcda0cdfce18")
+        self.assertIsNone(config.normalize_mac(""))
+        self.assertIsNone(config.normalize_mac("  "))
+        self.assertIsNone(config.normalize_mac(None))
+
+
 class InternetAlertChatIdsTest(unittest.TestCase):
     def ids(self, admin, extra):
         with mock.patch.object(config, "ADMIN_CHAT_ID", admin), \

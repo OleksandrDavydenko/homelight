@@ -22,7 +22,16 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-from config import ROUTER_HOST, ROUTER_PORT, SHELLY_AUTH_KEY, SHELLY_BASE_URL, TARGET_MAC, TIMEZONE
+from config import (
+    PLUG_MAC,
+    ROUTER_HOST,
+    ROUTER_PORT,
+    SHELLY_AUTH_KEY,
+    SHELLY_BASE_URL,
+    TARGET_MAC,
+    TIMEZONE,
+    normalize_mac,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +67,8 @@ class Reading:
     boot_time: int | None = None    # коли пристрій востаннє ввімкнувся (за його uptime)
     internet: bool | None = None    # чи відповідає домашній роутер; None — не перевірялося
     error: str | None = None
+    output: bool | None = None      # чи ввімкнене реле пристрою
+    plug: "Reading | None" = None   # розетка після перемикача резерву (якщо задано PLUG_MAC)
 
     @property
     def known(self) -> bool:
@@ -139,21 +150,68 @@ def _boot_time(device: dict, device_time: int | None, now: int) -> int | None:
     return int(reference - uptime)
 
 
-def _extract_switch_data(device: dict) -> tuple[float | None, float | None]:
-    """Напруга й частота з першого компонента switch* пристрою."""
+def _extract_switch_data(device: dict) -> tuple[float | None, float | None, bool | None]:
+    """Напруга, частота й стан реле з першого компонента switch* пристрою."""
     for key, value in device.items():
         if str(key).startswith("switch") and isinstance(value, dict):
-            return _to_float(value.get("voltage")), _to_float(value.get("freq"))
-    return None, None
+            output = value.get("output")
+            return (_to_float(value.get("voltage")), _to_float(value.get("freq")),
+                    output if isinstance(output, bool) else None)
+    return None, None, None
+
+
+def find_device(devices: dict, mac: str | None) -> dict | None:
+    """Статус пристрою з відповіді Shelly Cloud за MAC; без MAC — перший пристрій."""
+    if mac:
+        wanted = normalize_mac(mac)
+        for key, status in devices.items():
+            if normalize_mac(str(key)) == wanted and isinstance(status, dict):
+                return status
+        return None
+    return next((s for s in devices.values() if isinstance(s, dict)), None)
+
+
+def parse_device(device: dict | None, now: int) -> Reading:
+    """Стан одного пристрою зі статусу Shelly Cloud. Немає пристрою — він офлайн.
+
+    has_light: True/False — напруга вища/нижча за MIN_VOLTAGE (офлайн — False);
+    None — пристрій онлайн, але напруги не передав.
+    """
+    if device is None:
+        return Reading(has_light=False, fetched_at=now, online=False)
+
+    device_time = _parse_updated(device.get("_updated"), now)
+    dev_info = device.get("_dev_info")
+    if isinstance(dev_info, dict) and dev_info.get("online") is False:
+        return Reading(has_light=False, fetched_at=now, online=False, device_time=device_time)
+
+    boot_time = _boot_time(device, device_time, now)
+    voltage, frequency, output = _extract_switch_data(device)
+    if voltage is None:
+        return Reading(has_light=None, fetched_at=now, online=True, device_time=device_time,
+                       boot_time=boot_time, output=output, error="Пристрій не передав напругу")
+    return Reading(has_light=voltage > MIN_VOLTAGE, fetched_at=now, voltage=voltage,
+                   frequency=frequency, online=True, device_time=device_time,
+                   boot_time=boot_time, output=output)
+
+
+def _describe_plug(plug: Reading) -> str:
+    if plug.online is False:
+        return "офлайн"
+    if plug.voltage is None:
+        return "онлайн, напругу не передано"
+    relay = {True: "реле ввімкнене", False: "реле вимкнене"}.get(plug.output, "стан реле невідомий")
+    return f"{plug.voltage:.1f} В, {relay}"
 
 
 class LightChecker:
     def __init__(self, auth_key=SHELLY_AUTH_KEY, base_url=SHELLY_BASE_URL,
                  target_mac=TARGET_MAC, session=None,
-                 router_host=ROUTER_HOST, router_port=ROUTER_PORT):
+                 router_host=ROUTER_HOST, router_port=ROUTER_PORT, plug_mac=PLUG_MAC):
         self.auth_key = auth_key
         self.base_url = base_url
         self.target_mac = target_mac
+        self.plug_mac = plug_mac
         self.router_host = router_host
         self.router_port = router_port
         self._router_open_seen = False
@@ -198,50 +256,42 @@ class LightChecker:
         raise ShellyApiError(f"Не вдалося отримати дані з Shelly: {last_error}")
 
     def _find_device(self, devices: dict) -> dict | None:
-        if self.target_mac:
-            wanted = self.target_mac.lower()
-            for mac, status in devices.items():
-                if str(mac).lower() == wanted and isinstance(status, dict):
-                    return status
-            return None
-        return next((s for s in devices.values() if isinstance(s, dict)), None)
+        return find_device(devices, self.target_mac)
 
     def parse_reading(self, data: dict, now: int) -> Reading:
         """Перетворює відповідь Shelly Cloud на Reading (без мережевих запитів)."""
         devices = data.get("devices_status") or {}
-        device = self._find_device(devices) if isinstance(devices, dict) else None
+        if not isinstance(devices, dict):
+            devices = {}
+        device = self._find_device(devices)
+        reading = parse_device(device, now)
 
         if device is None:
             logger.info("Пристрою %s немає у відповіді Shelly Cloud — вважаю його офлайн",
                         self.target_mac or "(перший)")
-            return Reading(has_light=False, fetched_at=now, online=False)
-
-        device_time = _parse_updated(device.get("_updated"), now)
-        dev_info = device.get("_dev_info")
-        if isinstance(dev_info, dict) and dev_info.get("online") is False:
+        elif reading.online is False:
             logger.info("Shelly Cloud повідомляє, що пристрій офлайн")
-            return Reading(has_light=False, fetched_at=now, online=False, device_time=device_time)
-
-        boot_time = _boot_time(device, device_time, now)
-        if not self._uptime_logged:
-            self._uptime_logged = True
-            if boot_time is None:
-                logger.warning("Shelly Cloud не передає uptime пристрою: зникнення інтернету "
-                               "в будинку не вдасться відрізнити від відключення світла")
+        else:
+            if not self._uptime_logged:
+                self._uptime_logged = True
+                if reading.boot_time is None:
+                    logger.warning("Shelly Cloud не передає uptime пристрою: зникнення інтернету "
+                                   "в будинку не вдасться відрізнити від відключення світла")
+                else:
+                    logger.info("Shelly Cloud передає uptime пристрою (увімкнувся о %s UTC)",
+                                datetime.fromtimestamp(reading.boot_time, timezone.utc)
+                                .strftime("%Y-%m-%d %H:%M"))
+            if reading.voltage is None:
+                logger.warning("Пристрій онлайн, але не передав напругу")
             else:
-                logger.info("Shelly Cloud передає uptime пристрою (увімкнувся о %s UTC)",
-                            datetime.fromtimestamp(boot_time, timezone.utc).strftime("%Y-%m-%d %H:%M"))
+                logger.info("Напруга %.1f В — світло %s", reading.voltage,
+                            "Є" if reading.has_light else "НЕМАЄ")
 
-        voltage, frequency = _extract_switch_data(device)
-        if voltage is None:
-            logger.warning("Пристрій онлайн, але не передав напругу")
-            return Reading(has_light=None, fetched_at=now, online=True, device_time=device_time,
-                           boot_time=boot_time, error="Пристрій не передав напругу")
-
-        has_light = voltage > MIN_VOLTAGE
-        logger.info("Напруга %.1f В — світло %s", voltage, "Є" if has_light else "НЕМАЄ")
-        return Reading(has_light=has_light, fetched_at=now, voltage=voltage, frequency=frequency,
-                       online=True, device_time=device_time, boot_time=boot_time)
+        if self.plug_mac:
+            plug = parse_device(find_device(devices, self.plug_mac), now)
+            logger.info("Розетка після перемикача: %s", _describe_plug(plug))
+            reading = replace(reading, plug=plug)
+        return reading
 
     def get_reading(self, max_age: float = 0, attempts: int = 3, timeout: float = 10) -> Reading:
         """Поточне читання. Блокуючий виклик — з async-коду через asyncio.to_thread.
