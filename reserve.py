@@ -13,6 +13,13 @@
 
 Резерв ніколи не починається, поки світло від міста є: так перезапуск бота
 не дасть хибних повідомлень.
+
+Коли місто повертається, а ви на резерв не переходили, модуль і розетка
+вмикаються одночасно, але на зв'язок модуль може вийти пізніше. Щоб це не
+виглядало як резерв, резерв зараховується, лише коли розетка під напругою вже
+START_CONFIRM секунд, а модуль весь цей час не на зв'язку. Якщо модуль не
+виходив на зв'язок ще довше, то коли він з'явиться, видно, що він увімкнувся
+разом із розеткою, — тоді бот повідомляє, що резерву не було.
 """
 import logging
 from dataclasses import dataclass
@@ -26,6 +33,7 @@ logger = logging.getLogger(__name__)
 BOOT_TOLERANCE = 120
 SAME_BOOT_TOLERANCE = 60   # с; той самий запуск розетки (похибка годинників)
 OFFLINE_CONFIRM = OFFLINE_CONFIRM_SECONDS  # с без живлення розетки, після яких резерв вимкнено
+START_CONFIRM = OFFLINE_CONFIRM_SECONDS    # с під напругою без міста, після яких це резерв
 
 STARTED = "started"                    # перейшли на резерв
 CITY_BACK = "city_back"                # місто повернулося, а ви ще на резерві
@@ -33,6 +41,7 @@ SWITCHED_TO_CITY = "switched_to_city"  # перейшли з резерву на
 STOPPED = "stopped"                    # резерв вимкнено (розетка без живлення)
 RESUMED = "resumed"                    # резерв не вимикався — пропадав зв'язок
 BOILER_ON = "boiler_on"                # бойлер увімкнувся на резерві
+NOT_RESERVE = "not_reserve"            # резерву не було — місто повернулося, модуль довше виходив на зв'язок
 
 
 @dataclass(frozen=True)
@@ -52,15 +61,18 @@ class ReserveEvent:
 class ReserveTracker:
     def __init__(self, on: bool = False, since: int | None = None, plug_boot: int | None = None,
                  last_seen: int | None = None, city_back_noticed: bool = False,
-                 boiler_warned: bool = False, last_session: dict | None = None):
+                 boiler_warned: bool = False, last_session: dict | None = None,
+                 start_boot: int | None = None):
         self.on = on
         self.since = since                    # коли увімкнено резерв
         self.plug_boot = plug_boot            # останній запуск розетки на резерві
+        self.start_boot = start_boot          # запуск розетки, з якого почався резерв
         self.last_seen = last_seen            # коли розетку востаннє бачили під напругою
         self.city_back_noticed = city_back_noticed
         self.boiler_warned = boiler_warned
         self.last_session = last_session      # останній резерв, що вимкнувся через зникнення розетки
         self._offline_since: int | None = None
+        self._powered_since: int | None = None  # коли розетку вперше побачили під напругою без міста
         self._no_reboot_logged = False
 
     @classmethod
@@ -72,22 +84,28 @@ class ReserveTracker:
                    plug_boot=data.get("plug_boot"), last_seen=data.get("last_seen"),
                    city_back_noticed=bool(data.get("city_back_noticed")),
                    boiler_warned=bool(data.get("boiler_warned")),
-                   last_session=session if isinstance(session, dict) else None)
+                   last_session=session if isinstance(session, dict) else None,
+                   start_boot=data.get("start_boot"))
 
     def to_dict(self) -> dict:
         return {"on": self.on, "since": self.since, "plug_boot": self.plug_boot,
-                "last_seen": self.last_seen, "city_back_noticed": self.city_back_noticed,
+                "start_boot": self.start_boot, "last_seen": self.last_seen,
+                "city_back_noticed": self.city_back_noticed,
                 "boiler_warned": self.boiler_warned, "last_session": self.last_session}
 
     def observe(self, plug: Reading | None, city_has_light: bool | None,
-                city_since: int | None, internet: bool | None, now: int) -> list[ReserveEvent]:
+                city_since: int | None, internet: bool | None, now: int,
+                city_online: bool | None = None) -> list[ReserveEvent]:
         """plug — читання розетки; city_* — підтверджений стан світла від міста;
-        internet=False — вдома немає інтернету (тоді зникнення розетки нічого не означає).
+        internet=False — вдома немає інтернету (тоді зникнення розетки нічого не означає);
+        city_online — чи модуль на лінії міста на зв'язку просто зараз (тоді місто є,
+        навіть якщо бот ще не підтвердив його повернення).
         """
         if plug is None or city_has_light is None:
             return []
         if plug.online is True and plug.has_light is True:
-            return self._powered(plug, city_has_light, city_since, now)
+            return self._powered(plug, city_has_light, city_since, now, city_online)
+        self._powered_since = None
         if plug.online is False or plug.has_light is False:
             return self._unpowered(city_has_light, city_since, internet, now)
         return []  # онлайн, але без даних про напругу
@@ -95,7 +113,7 @@ class ReserveTracker:
     # ---------- Розетка під напругою ----------
 
     def _powered(self, plug: Reading, city_has_light: bool, city_since: int | None,
-                 now: int) -> list[ReserveEvent]:
+                 now: int, city_online: bool | None) -> list[ReserveEvent]:
         self._offline_since = None
         boot = plug.boot_time
         events: list[ReserveEvent] = []
@@ -104,11 +122,14 @@ class ReserveTracker:
             if self._resumable(boot):
                 session = self.last_session
                 self._begin(session["since"], boot, now)
+                self.start_boot = session.get("start_boot", self.start_boot)
                 events.append(ReserveEvent(RESUMED, self.since, at=now,
                                            city_has_light=city_has_light, city_since=city_since))
             else:
                 self.last_session = None
-                if city_has_light:
+                if city_has_light or city_online:
+                    # Модуль на лінії міста на зв'язку — місто є, це не резерв
+                    self._powered_since = None
                     return []
                 if boot is not None and city_since is not None and boot < city_since - BOOT_TOLERANCE:
                     if not self._no_reboot_logged:
@@ -116,7 +137,12 @@ class ReserveTracker:
                         logger.warning("Світла від міста немає, а розетка не перезавантажувалась — "
                                        "резерв не фіксую (перевірте, чи модуль у щитку на зв'язку)")
                     return []
-                since = boot if boot is not None and boot <= now else now
+                if self._powered_since is None:
+                    self._powered_since = now
+                since = boot if boot is not None and boot <= now else self._powered_since
+                if now - since < START_CONFIRM:
+                    # Можливо, місто щойно повернулося, а модуль ще виходить на зв'язок
+                    return []
                 self._begin(since, boot, now)
                 self.boiler_warned = plug.output is True
                 return [ReserveEvent(STARTED, since, at=now, city_has_light=False,
@@ -126,10 +152,16 @@ class ReserveTracker:
         self.last_seen = now
         if city_has_light:
             if boot is not None and city_since is not None and boot >= city_since - BOOT_TOLERANCE:
-                # Розетка перезавантажилась, коли місто вже було, — перейшли на місто
-                end = min(max(boot, self.since), now)
-                events.append(ReserveEvent(SWITCHED_TO_CITY, self.since, at=end,
-                                           city_has_light=True, city_since=city_since))
+                if self._started_with_city(boot, city_since):
+                    # Розетка не перезавантажувалась і ввімкнулася разом із модулем міста:
+                    # місто повернулося, модуль просто довше виходив на зв'язок
+                    events.append(ReserveEvent(NOT_RESERVE, self.since, at=now,
+                                               city_has_light=True, city_since=city_since))
+                else:
+                    # Розетка перезавантажилась, коли місто вже було, — перейшли на місто
+                    end = min(max(boot, self.since), now)
+                    events.append(ReserveEvent(SWITCHED_TO_CITY, self.since, at=end,
+                                               city_has_light=True, city_since=city_since))
                 self._end()
                 return events
             if not self.city_back_noticed:
@@ -160,7 +192,8 @@ class ReserveTracker:
         end = max(self.last_seen or self._offline_since, self.since)
         event = ReserveEvent(STOPPED, self.since, at=end, city_has_light=city_has_light,
                              city_since=city_since)
-        session = {"since": self.since, "plug_boot": self.plug_boot, "ended": end}
+        session = {"since": self.since, "plug_boot": self.plug_boot,
+                   "start_boot": self.start_boot, "ended": end}
         self._end()
         self.last_session = session
         return [event]
@@ -174,16 +207,25 @@ class ReserveTracker:
                 and session.get("since") is not None
                 and abs(boot - session["plug_boot"]) <= SAME_BOOT_TOLERANCE)
 
+    def _started_with_city(self, boot: int, city_since: int) -> bool:
+        """Розетка не перезавантажувалась від «початку резерву», і той запуск
+        збігся з поверненням міста, — отже, резерву не було."""
+        return (self.start_boot is not None
+                and abs(boot - self.start_boot) <= SAME_BOOT_TOLERANCE
+                and abs(self.start_boot - city_since) <= BOOT_TOLERANCE)
+
     def _begin(self, since: int, boot: int | None, now: int) -> None:
         self.on, self.since, self.plug_boot, self.last_seen = True, since, boot, now
+        self.start_boot = boot
         self.city_back_noticed = self.boiler_warned = False
         self.last_session = None
-        self._offline_since = None
+        self._offline_since = self._powered_since = None
 
     def _end(self) -> None:
         self.on, self.since, self.plug_boot, self.last_seen = False, None, None, None
+        self.start_boot = None
         self.city_back_noticed = self.boiler_warned = False
-        self._offline_since = None
+        self._offline_since = self._powered_since = None
 
 
 # ---------- Тексти повідомлень ----------
@@ -224,6 +266,11 @@ def format_reserve_event(event: ReserveEvent, now: int) -> str:
         return ("ℹ️ Резерв не вимикався — пропадав зв'язок.\n"
                 f"На резерві з {format_moment(event.since, now)} "
                 f"({format_duration(now - event.since)}).")
+
+    if event.kind == NOT_RESERVE:
+        return ("ℹ️ Ви не переходили на резерв — світло від міста повернулося, "
+                "просто датчик світла довше виходив на зв'язок.\n"
+                "Попереднє повідомлення про резерв було помилковим.")
 
     if event.kind == BOILER_ON:
         return ("⚠️ Бойлер увімкнувся, хоча ви на резерві.\n"

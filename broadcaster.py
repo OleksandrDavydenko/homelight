@@ -236,11 +236,12 @@ class ReserveWatch:
         self.tracker = tracker or ReserveTracker()
 
     async def observe(self, bot: Bot, plug: Reading | None, city: StateTracker,
-                      internet: bool | None, now: int) -> None:
+                      internet: bool | None, now: int, city_online: bool | None = None) -> None:
         if not self.chat_id:
             return
         before = self.tracker.to_dict()
-        events = self.tracker.observe(plug, city.has_light, city.since, internet, now)
+        events = self.tracker.observe(plug, city.has_light, city.since, internet, now,
+                                      city_online=city_online)
         state = self.tracker.to_dict()
         if state != before:
             try:
@@ -310,7 +311,8 @@ async def run_check(bot: Bot, checker: LightChecker, tracker: StateTracker,
         # Після tracker.observe — щоб стан світла від міста був актуальний
         try:
             await reserve_watch.observe(bot, reading.plug, tracker,
-                                        internet if internet is not None else reading.internet, now)
+                                        internet if internet is not None else reading.internet, now,
+                                        city_online=reading.online)
         except Exception:
             logger.exception("Не вдалося обробити стан резерву")
 

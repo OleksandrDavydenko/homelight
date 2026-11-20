@@ -5,8 +5,10 @@ from light_checker import Reading
 from reserve import (
     BOILER_ON,
     CITY_BACK,
+    NOT_RESERVE,
     OFFLINE_CONFIRM,
     RESUMED,
+    START_CONFIRM,
     STARTED,
     STOPPED,
     SWITCHED_TO_CITY,
@@ -32,15 +34,18 @@ class ReserveTrackerTest(unittest.TestCase):
     def setUp(self):
         self.tracker = ReserveTracker()
 
-    def observe(self, plug, city, city_since, now, internet=None):
-        return self.tracker.observe(plug, city, city_since, internet, now)
+    def observe(self, plug, city, city_since, now, internet=None, city_online=None):
+        return self.tracker.observe(plug, city, city_since, internet, now, city_online=city_online)
 
-    def start_reserve(self, boot=T0 + 600, now=T0 + 700):
+    def start_reserve(self, boot=T0 + 600, now=T0 + 600 + START_CONFIRM):
         events = self.observe(plug_on(boot, now), False, T0, now)
         self.assertEqual([e.kind for e in events], [STARTED])
         return events[0]
 
     def test_start_on_reserve(self):
+        # Перші хвилини після появи напруги — ще не резерв (модуль міста може виходити на зв'язок)
+        self.assertEqual(self.observe(plug_on(T0 + 600, T0 + 700), False, T0, T0 + 700), [])
+        self.assertFalse(self.tracker.on)
         event = self.start_reserve()
         self.assertEqual(event.since, T0 + 600)  # момент перемикання — запуск розетки
         self.assertEqual(event.city_since, T0)
@@ -68,7 +73,8 @@ class ReserveTrackerTest(unittest.TestCase):
 
     def test_quick_switch_before_bot_noticed_outage(self):
         # Перемкнулися швидше, ніж бот помітив відключення
-        events = self.observe(plug_on(T0 - 60, T0 + 30), False, T0, T0 + 30)
+        self.assertEqual(self.observe(plug_on(T0 - 60, T0 + 30), False, T0, T0 + 30), [])
+        events = self.observe(plug_on(T0 - 60, T0 + 130), False, T0, T0 + 130)
         self.assertEqual([e.kind for e in events], [STARTED])
         self.assertEqual(events[0].since, T0 - 60)
 
@@ -167,7 +173,7 @@ class ReserveTrackerTest(unittest.TestCase):
         self.observe(plug_off(T0 + 800), False, T0, T0 + 800)
         self.observe(plug_off(T0 + 1000), False, T0, T0 + 1000)
         # Резерв увімкнули знову — розетка запустилась заново
-        events = self.observe(plug_on(T0 + 2000, T0 + 2050), False, T0, T0 + 2050)
+        events = self.observe(plug_on(T0 + 2000, T0 + 2200), False, T0, T0 + 2200)
         self.assertEqual([e.kind for e in events], [STARTED])
         self.assertEqual(events[0].since, T0 + 2000)
         self.assertIsNone(self.tracker.last_session)
@@ -180,11 +186,44 @@ class ReserveTrackerTest(unittest.TestCase):
                          [])
 
     def test_start_with_boiler_on_does_not_warn_twice(self):
-        events = self.observe(plug_on(T0 + 600, T0 + 700, output=True), False, T0, T0 + 700)
+        events = self.observe(plug_on(T0 + 600, T0 + 780, output=True), False, T0, T0 + 780)
         self.assertEqual([e.kind for e in events], [STARTED])
         self.assertIs(events[0].boiler_on, True)
         self.assertEqual(self.observe(plug_on(T0 + 600, T0 + 800, output=True), False, T0, T0 + 800),
                          [])
+
+    def test_city_returned_without_switching_is_not_reserve(self):
+        # Ви не переходили на резерв: місто повернулося, модуль і розетка ввімкнулися разом
+        back = T0 + 3600
+        self.assertEqual(self.observe(plug_on(back, back + 30), False, T0, back + 30,
+                                      city_online=False), [])  # модуль ще не на зв'язку
+        self.assertEqual(self.observe(plug_on(back, back + 120), False, T0, back + 120,
+                                      city_online=True), [])   # бот ще не підтвердив місто
+        self.assertEqual(self.observe(plug_on(back, back + 240), True, back + 2, back + 240,
+                                      city_online=True), [])
+        self.assertFalse(self.tracker.on)
+
+    def test_city_online_blocks_start(self):
+        self.assertEqual(self.observe(plug_on(T0 + 600, T0 + 1000), False, T0, T0 + 1000,
+                                      city_online=True), [])
+        self.assertFalse(self.tracker.on)
+
+    def test_module_very_late_after_city_return_is_corrected(self):
+        back = T0 + 3600
+        self.observe(plug_on(back, back + 30), False, T0, back + 30, city_online=False)
+        events = self.observe(plug_on(back, back + 200), False, T0, back + 200, city_online=False)
+        self.assertEqual([e.kind for e in events], [STARTED])  # модуль не на зв'язку понад 3 хв
+        # Модуль нарешті на зв'язку: увімкнувся разом із розеткою — резерву не було
+        events = self.observe(plug_on(back, back + 400), True, back + 3, back + 400, city_online=True)
+        self.assertEqual([e.kind for e in events], [NOT_RESERVE])
+        self.assertFalse(self.tracker.on)
+
+    def test_real_switch_soon_after_city_return_is_not_cancelled(self):
+        # Резерв з T0+600; місто повернулося, і ви одразу перемкнулися на місто
+        self.start_reserve()
+        back = T0 + 7200
+        events = self.observe(plug_on(back + 20, back + 100), True, back, back + 100, city_online=True)
+        self.assertEqual([e.kind for e in events], [SWITCHED_TO_CITY])
 
     def test_state_roundtrip(self):
         self.start_reserve()
@@ -229,9 +268,10 @@ class FormatTest(unittest.TestCase):
         self.assertIn("можна перемикатися", self.text(CITY_BACK, city_has_light=True))
         self.assertIn("Резерв не вимикався", self.text(RESUMED))
         self.assertIn("Бойлер увімкнувся", self.text(BOILER_ON))
+        self.assertIn("не переходили на резерв", self.text(NOT_RESERVE))
 
     def test_no_device_names(self):
-        for kind in (STARTED, CITY_BACK, SWITCHED_TO_CITY, STOPPED, RESUMED, BOILER_ON):
+        for kind in (STARTED, CITY_BACK, SWITCHED_TO_CITY, STOPPED, RESUMED, BOILER_ON, NOT_RESERVE):
             self.assertNotIn("shelly", self.text(kind, boiler_on=True).lower())
 
     def test_unknown_kind(self):
